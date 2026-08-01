@@ -1,4 +1,9 @@
-"""FIFO Request Queue (PRD Section 6.2). Priority/WFQ sub-queues land in Phase 3."""
+"""Request Queue (PRD Section 6.2): holds admitted-but-not-yet-running requests.
+
+A reorderable waiting pool rather than a blind FIFO — the active
+SchedulingPolicy (tinyserve.scheduler) decides which subset of `waiting()`
+claims a free concurrency slot next; this module has no opinion on order.
+"""
 
 import asyncio
 import time
@@ -10,36 +15,32 @@ class PendingRequest:
     id: str
     prompt_tokens: list[int]
     max_tokens: int
+    priority: int = 1
     arrival_ts: float = field(default_factory=time.monotonic)
 
 
 class RequestQueue:
-    """Holds admitted requests in arrival order until a batch-loop tick claims them."""
-
     def __init__(self) -> None:
-        self._queue: asyncio.Queue[PendingRequest] = asyncio.Queue()
+        self._waiting: dict[str, PendingRequest] = {}
+        self._arrived = asyncio.Event()
 
     def push(self, request: PendingRequest) -> None:
-        self._queue.put_nowait(request)
+        self._waiting[request.id] = request
+        self._arrived.set()
 
-    def pop_batch(self, max_count: int) -> list[PendingRequest]:
-        """Claim up to max_count requests without blocking.
+    def waiting(self) -> list[PendingRequest]:
+        """All currently-queued requests — a policy chooses among these."""
+        return list(self._waiting.values())
 
-        Used every tick to fill free concurrency slots; returns fewer (or
-        none) if the queue doesn't have that many waiting.
-        """
-        requests: list[PendingRequest] = []
-        for _ in range(max_count):
-            try:
-                requests.append(self._queue.get_nowait())
-            except asyncio.QueueEmpty:
-                break
-        return requests
+    def remove(self, request_id: str) -> PendingRequest:
+        return self._waiting.pop(request_id)
 
-    async def wait_for_next(self) -> PendingRequest:
-        """Block until at least one request arrives — used only when idle,
-        so the tick loop doesn't busy-spin with no active sequences."""
-        return await self._queue.get()
+    async def wait_until_nonempty(self) -> None:
+        """Block only while there's nothing queued, so the tick loop doesn't
+        busy-spin when idle; returns as soon as anything arrives."""
+        while not self._waiting:
+            self._arrived.clear()
+            await self._arrived.wait()
 
     def depth(self) -> int:
-        return self._queue.qsize()
+        return len(self._waiting)

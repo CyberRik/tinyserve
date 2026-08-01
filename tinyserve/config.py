@@ -13,3 +13,7 @@ class Settings(BaseSettings):
     n_ctx: int = 2048
     n_seq_max: int = 4
     kv_block_size: int = 16
+    chunk_size: int = 512
+    scheduling_policy: str = "wfq"
+    queue_timeout_seconds: float = 30.0
+    generation_timeout_seconds: float = 120.0

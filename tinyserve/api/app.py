@@ -1,16 +1,16 @@
-"""FastAPI app. Phase 2: real continuous batching over multiple concurrent
-sequences, admission control wired to the KV Cache Manager.
+"""FastAPI app. Phase 3: pluggable scheduling policy, chunked prefill,
+queue/generation timeouts on top of Phase 2's continuous batching.
 
-Each tick: admit newly-queued requests into any free concurrency slot,
-build one batch spanning every active sequence's pending tokens (new
-prompts *and* in-flight decode steps together), and run exactly one
-llama_decode() call for the whole batch — this is what keeps the runtime
-busy across concurrent requests instead of finishing one before starting
-the next (PRD Section 7).
+Each tick: expire any waiter that's been queued too long, let the active
+SchedulingPolicy choose which waiting requests claim free concurrency
+slots, build one batch spanning every active sequence's pending tokens
+(chunked prefill included), and run exactly one llama_decode() call for
+the whole batch.
 """
 
 import asyncio
 import logging
+import time
 import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -25,6 +25,7 @@ from tinyserve.config import Settings
 from tinyserve.kv_cache.manager import KVCacheManager
 from tinyserve.queue.request_queue import PendingRequest, RequestQueue
 from tinyserve.runtime.llama_runtime import LlamaRuntime
+from tinyserve.scheduler.base import SchedulingPolicy, create_policy
 from tinyserve.streaming.stream_manager import StreamManager
 
 logger = logging.getLogger(__name__)
@@ -35,11 +36,16 @@ async def batch_loop(
     runtime: LlamaRuntime,
     streams: StreamManager,
     kv_cache: KVCacheManager,
+    policy: SchedulingPolicy,
     n_seq_max: int,
+    chunk_size: int,
+    queue_timeout_seconds: float,
+    generation_timeout_seconds: float,
 ) -> None:
     active: dict[str, ActiveSequence] = {}  # request_id -> sequence state
     remaining_tokens: dict[str, int] = {}  # request_id -> generations left
     seq_id_of: dict[str, int] = {}  # request_id -> llama seq_id slot
+    admitted_at: dict[str, float] = {}  # request_id -> monotonic admission time
     free_slots = list(range(n_seq_max))
 
     def admit(request: PendingRequest) -> None:
@@ -49,6 +55,7 @@ async def batch_loop(
             seq_id=seq_id, pending_tokens=request.prompt_tokens, n_past=0
         )
         remaining_tokens[request.id] = request.max_tokens
+        admitted_at[request.id] = time.monotonic()
 
     def finish(request_id: str) -> None:
         seq_id = seq_id_of.pop(request_id)
@@ -56,20 +63,33 @@ async def batch_loop(
         free_slots.append(seq_id)
         active.pop(request_id)
         remaining_tokens.pop(request_id)
+        admitted_at.pop(request_id)
         kv_cache.release(request_id)
         streams.close(request_id)
 
-    while True:
-        if not active:
-            admit(await queue.wait_for_next())
-        for request in queue.pop_batch(max_count=len(free_slots)):
-            admit(request)
+    def expire_stale_waiters() -> None:
+        now = time.monotonic()
+        for request in queue.waiting():
+            if now - request.arrival_ts > queue_timeout_seconds:
+                queue.remove(request.id)
+                kv_cache.release(request.id)
+                streams.close(request.id)
 
-        prepared = build_batch(list(active.values()), runtime.batch_capacity)
+    while True:
+        expire_stale_waiters()
+        if not active and queue.depth() == 0:
+            await queue.wait_until_nonempty()
+            expire_stale_waiters()
+
+        if free_slots:
+            for request in policy.select(queue.waiting(), capacity=len(free_slots)):
+                queue.remove(request.id)
+                admit(request)
+
+        prepared = build_batch(list(active.values()), runtime.batch_capacity, chunk_size)
         if len(prepared) == 0:
-            # Every active sequence's pending tokens are too large to fit
-            # this tick's capacity alongside the others — yield and retry
-            # rather than busy-spin.
+            # Every active sequence's next slice is too large to fit this
+            # tick's capacity — yield and retry rather than busy-spin.
             await asyncio.sleep(0)
             continue
 
@@ -82,16 +102,23 @@ async def batch_loop(
             continue
 
         request_id_of = {seq.seq_id: request_id for request_id, seq in active.items()}
+        for seq_id in {row.seq_id for row in prepared.rows}:
+            seq = active[request_id_of[seq_id]]
+            consumed = prepared.row_count(seq_id)
+            seq.n_past += consumed
+            seq.pending_tokens = seq.pending_tokens[consumed:]
+
+        now = time.monotonic()
         for seq_id, token in sampled.items():
             request_id = request_id_of[seq_id]
             seq = active[request_id]
-            seq.n_past += len(seq.pending_tokens)
             remaining_tokens[request_id] -= 1
 
             is_done = (
                 token == runtime.eos_token
                 or remaining_tokens[request_id] <= 0
                 or streams.is_cancelled(request_id)
+                or (now - admitted_at[request_id]) > generation_timeout_seconds
             )
             if is_done:
                 finish(request_id)
@@ -107,13 +134,24 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         model_path=settings.model_path, n_ctx=settings.n_ctx, n_seq_max=settings.n_seq_max
     )
     kv_cache = KVCacheManager(total_tokens=settings.n_ctx, block_size=settings.kv_block_size)
+    policy = create_policy(settings.scheduling_policy)
 
     app.state.runtime = runtime
     app.state.queue = RequestQueue()
     app.state.streams = StreamManager()
     app.state.admission = AdmissionController(kv_cache)
     app.state.batch_loop_task = asyncio.create_task(
-        batch_loop(app.state.queue, runtime, app.state.streams, kv_cache, settings.n_seq_max)
+        batch_loop(
+            app.state.queue,
+            runtime,
+            app.state.streams,
+            kv_cache,
+            policy,
+            settings.n_seq_max,
+            settings.chunk_size,
+            settings.queue_timeout_seconds,
+            settings.generation_timeout_seconds,
+        )
     )
     yield
     app.state.batch_loop_task.cancel()
@@ -159,7 +197,12 @@ async def generate(
 
     streams.create(request_id)
     queue.push(
-        PendingRequest(id=request_id, prompt_tokens=prompt_tokens, max_tokens=body.max_tokens)
+        PendingRequest(
+            id=request_id,
+            prompt_tokens=prompt_tokens,
+            max_tokens=body.max_tokens,
+            priority=body.priority,
+        )
     )
 
     if body.stream:
