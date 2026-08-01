@@ -11,3 +11,5 @@ class Settings(BaseSettings):
     log_level: str = "info"
     model_path: str
     n_ctx: int = 2048
+    n_seq_max: int = 4
+    kv_block_size: int = 16

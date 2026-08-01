@@ -35,7 +35,12 @@ class StreamManager:
         self._streams[request_id] = _Stream()
 
     def push_token(self, request_id: str, token_bytes: bytes) -> None:
-        stream = self._streams[request_id]
+        # A disconnected client's stream can already be gone by the time the
+        # producer checks is_cancelled() again (cancellation is checked once
+        # per token, not instantly) — that's a normal race, not an error.
+        stream = self._streams.get(request_id)
+        if stream is None:
+            return
         text = stream.decoder.decode(token_bytes)
         if text:
             stream.queue.put_nowait(text)

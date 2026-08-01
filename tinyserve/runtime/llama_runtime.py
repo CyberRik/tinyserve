@@ -1,70 +1,93 @@
 """The only module allowed to import llama.cpp bindings (PRD Section 13/14).
 
-Phase 1: token-by-token streaming against one in-flight request at a time —
-no batching across concurrent requests yet (that's Phase 2's KV Cache
-Manager + real batch loop). Everything here still runs one call at a time
-off the event loop, via a producer thread bridged through an asyncio.Queue.
+Phase 2: real multi-sequence continuous batching. The Runtime owns one
+llama_context created with kv_unified=True and n_seq_max concurrent
+sequence slots sharing that single KV-cache budget (PRD Section 8) — the
+batch loop feeds it a PreparedBatch built by tinyserve.batch.builder each
+tick, and one llama_decode() call advances every sequence in that batch at
+once, however many requests it contains.
+
+Sampling here is plain greedy (argmax) — no temperature/top-k/top-p yet;
+that's a real simplification, not an oversight, kept out of scope until a
+phase that actually needs configurable sampling.
 """
 
 import asyncio
-import threading
-from collections.abc import AsyncIterator, Callable
 
-from llama_cpp import Llama
+import numpy as np
+from llama_cpp import Llama, llama_cpp
+from llama_cpp._internals import LlamaContext
+
+from tinyserve.batch.builder import PreparedBatch
 
 
 class LlamaRuntime:
-    """Loads one GGUF model and runs completions against it."""
+    """Loads one GGUF model and runs batched decode ticks against it."""
 
-    def __init__(self, model_path: str, n_ctx: int = 2048) -> None:
-        self._llm = Llama(model_path=model_path, n_ctx=n_ctx, verbose=False)
+    def __init__(self, model_path: str, n_ctx: int, n_seq_max: int) -> None:
+        # A throwaway, minimal-size context: only used for its tokenizer and
+        # loaded model weights. The real decode context is built separately
+        # below so we control n_seq_max and kv_unified ourselves.
+        self._llm = Llama(model_path=model_path, n_ctx=8, verbose=False)
 
-    async def stream(
-        self,
-        prompt: str,
-        max_tokens: int,
-        is_cancelled: Callable[[], bool],
-    ) -> AsyncIterator[bytes]:
-        """Yield raw detokenized bytes for each new token as it's sampled.
+        params = llama_cpp.llama_context_default_params()
+        params.n_ctx = n_ctx
+        params.n_batch = n_ctx
+        params.n_ubatch = n_ctx
+        params.n_seq_max = n_seq_max
+        params.kv_unified = True
 
-        Bytes, not str: a single Unicode codepoint can span multiple tokens,
-        so UTF-8 reassembly is the caller's job (Stream Manager), not this
-        binding's — this module only ever hands back what llama.cpp produced.
+        self._ctx = LlamaContext(model=self._llm._model, params=params, verbose=False)
+        self._n_vocab = self._llm._model.n_vocab()
+        self._batch_capacity = int(params.n_batch)
+        self._batch = llama_cpp.llama_batch_init(self._batch_capacity, 0, n_seq_max)
+        self.eos_token = self._llm.token_eos()
+
+    @property
+    def batch_capacity(self) -> int:
+        return self._batch_capacity
+
+    def tokenize(self, prompt: str) -> list[int]:
+        result: list[int] = self._llm.tokenize(prompt.encode("utf-8"), add_bos=True)
+        return result
+
+    def detokenize(self, tokens: list[int]) -> bytes:
+        result: bytes = self._llm.detokenize(tokens)
+        return result
+
+    def free_sequence(self, seq_id: int) -> None:
+        """Release this sequence's KV cells so llama.cpp can reuse them."""
+        self._ctx.kv_cache_seq_rm(seq_id, -1, -1)
+
+    async def decode(self, batch: PreparedBatch) -> dict[int, int]:
+        """Run one llama_decode() call for `batch`, off the event loop.
+
+        Returns the greedily-sampled next token for every seq_id whose row
+        was flagged needs_logits — i.e. every sequence that advanced this tick.
         """
-        loop = asyncio.get_running_loop()
-        out_queue: asyncio.Queue[bytes | None] = asyncio.Queue()
+        return await asyncio.to_thread(self._decode_sync, batch)
 
-        thread = threading.Thread(
-            target=self._stream_worker,
-            args=(prompt, max_tokens, is_cancelled, loop, out_queue),
-            daemon=True,
-        )
-        thread.start()
+    def _decode_sync(self, batch: PreparedBatch) -> dict[int, int]:
+        rows = batch.rows
+        self._batch.n_tokens = len(rows)
+        for i, row in enumerate(rows):
+            self._batch.token[i] = row.token
+            self._batch.pos[i] = row.pos
+            self._batch.n_seq_id[i] = 1
+            self._batch.seq_id[i][0] = row.seq_id
+            self._batch.logits[i] = row.needs_logits
 
-        while True:
-            chunk = await out_queue.get()
-            if chunk is None:
-                break
-            yield chunk
+        return_code = llama_cpp.llama_decode(self._ctx.ctx, self._batch)
+        if return_code != 0:
+            raise RuntimeError(f"llama_decode failed with return code {return_code}")
 
-    def _stream_worker(
-        self,
-        prompt: str,
-        max_tokens: int,
-        is_cancelled: Callable[[], bool],
-        loop: asyncio.AbstractEventLoop,
-        out_queue: "asyncio.Queue[bytes | None]",
-    ) -> None:
-        try:
-            prompt_tokens = self._llm.tokenize(prompt.encode("utf-8"))
-            all_tokens = list(prompt_tokens)
-            eos_token = self._llm.token_eos()
+        sampled: dict[int, int] = {}
+        for i, row in enumerate(rows):
+            if row.needs_logits:
+                sampled[row.seq_id] = self._sample_greedy(i)
+        return sampled
 
-            for count, token in enumerate(self._llm.generate(prompt_tokens), start=1):
-                if count > max_tokens or token == eos_token or is_cancelled():
-                    break
-                token_bytes = self._llm.detokenize([token], prev_tokens=all_tokens)
-                all_tokens.append(token)
-                loop.call_soon_threadsafe(out_queue.put_nowait, token_bytes)
-        finally:
-            loop.call_soon_threadsafe(out_queue.put_nowait, None)
+    def _sample_greedy(self, batch_row_index: int) -> int:
+        logits_ptr = self._ctx.get_logits_ith(batch_row_index)
+        logits = np.ctypeslib.as_array(logits_ptr, shape=(self._n_vocab,))
+        return int(np.argmax(logits))

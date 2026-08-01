@@ -52,6 +52,16 @@ def test_is_cancelled_true_for_unknown_request() -> None:
     assert manager.is_cancelled("never-created") is True
 
 
+def test_push_token_after_stream_removed_is_a_noop() -> None:
+    # Mirrors the real race: a disconnected client's stream is already gone
+    # (subscribe()'s cleanup ran) by the time the producer thread pushes one
+    # more token, since is_cancelled() is only checked once per token, not
+    # instantly. This must not raise.
+    manager = StreamManager()
+
+    manager.push_token("never-created", b"too late")
+
+
 def test_subscribe_removes_stream_after_completion() -> None:
     # is_cancelled() defaults to True for an unknown request_id, so this
     # doubles as a black-box check that subscribe() cleaned up its entry.
