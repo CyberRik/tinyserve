@@ -1,0 +1,11 @@
+global:
+  scrape_interval: 5s
+
+scrape_configs:
+  - job_name: tinyserve
+    static_configs:
+      # host.docker.internal resolves to the Docker host from inside a
+      # container on Docker Desktop (Windows/Mac) — TinyServe itself runs
+      # as a plain host process, not another container (PRD Section 13:
+      # no Kubernetes, no microservices, for TinyServe's own deployment).
+      - targets: ["host.docker.internal:8000"]

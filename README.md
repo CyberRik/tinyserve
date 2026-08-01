@@ -9,9 +9,10 @@ KV-cache design, observability plan, and the phased roadmap this project follows
 
 ## Status
 
-Phase 0 (repo/CI/tooling) and Phase 0's "bare execution loop" milestone are done: a naive,
-non-streaming `POST /generate` running against a real llama.cpp-loaded GGUF model. See
-`PRD.md` Section 12 for the full roadmap.
+Phases 0-4 are done: repo/CI/tooling, streaming, real multi-sequence continuous batching
+with a block-based KV Cache Manager, pluggable scheduling (FIFO/Priority/WFQ) with chunked
+prefill and timeouts, and Prometheus metrics + OpenTelemetry tracing. See `PRD.md` Section 12
+for the full roadmap.
 
 ## Development
 
@@ -44,3 +45,23 @@ automatically if `models/qwen2.5-0.5b-instruct-q4_k_m.gguf` isn't present:
 ```bash
 uv run pytest tests/integration -m slow
 ```
+
+## Observability
+
+`GET /metrics` exposes Prometheus-format metrics (admission accept/reject, queue depth and
+wait time, batch size/utilization, KV block usage, TTFT, inter-token latency, decode step
+duration, scheduler decisions, cancellations). Each request also gets one OpenTelemetry trace
+with `admission` / `queue_wait` / `generation` child spans, printed to the console by default.
+
+A local Prometheus + Grafana stack (with a pre-provisioned dashboard) is in `deploy/`:
+
+```bash
+cd deploy
+docker compose up -d
+# Prometheus: http://localhost:9090
+# Grafana:    http://localhost:3000  (anonymous admin access, local dev only)
+```
+
+Prometheus scrapes TinyServe on the host via `host.docker.internal:8000`, so start the
+server on the host first. See `docs/profiling-notes.md` for a real `py-spy` profiling
+session and what it found.
