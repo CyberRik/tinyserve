@@ -1,21 +1,16 @@
 """The only module allowed to import llama.cpp bindings (PRD Section 13/14).
 
-Phase 0: a thin, naive wrapper — one request in, one completion out, no
-batching or streaming. Later phases replace the internals (real llama_decode
-batch loop, KV cache manager) behind the same async surface.
+Phase 1: token-by-token streaming against one in-flight request at a time —
+no batching across concurrent requests yet (that's Phase 2's KV Cache
+Manager + real batch loop). Everything here still runs one call at a time
+off the event loop, via a producer thread bridged through an asyncio.Queue.
 """
 
 import asyncio
-from dataclasses import dataclass
+import threading
+from collections.abc import AsyncIterator, Callable
 
 from llama_cpp import Llama
-
-
-@dataclass(frozen=True)
-class GenerationResult:
-    text: str
-    prompt_tokens: int
-    completion_tokens: int
 
 
 class LlamaRuntime:
@@ -24,22 +19,52 @@ class LlamaRuntime:
     def __init__(self, model_path: str, n_ctx: int = 2048) -> None:
         self._llm = Llama(model_path=model_path, n_ctx=n_ctx, verbose=False)
 
-    async def generate(self, prompt: str, max_tokens: int) -> GenerationResult:
-        """Run a full (non-streaming) completion in a worker thread.
+    async def stream(
+        self,
+        prompt: str,
+        max_tokens: int,
+        is_cancelled: Callable[[], bool],
+    ) -> AsyncIterator[bytes]:
+        """Yield raw detokenized bytes for each new token as it's sampled.
 
-        llama.cpp's decode call is blocking C code, so it runs via
-        asyncio.to_thread rather than on the event loop directly.
+        Bytes, not str: a single Unicode codepoint can span multiple tokens,
+        so UTF-8 reassembly is the caller's job (Stream Manager), not this
+        binding's — this module only ever hands back what llama.cpp produced.
         """
-        return await asyncio.to_thread(self._generate_sync, prompt, max_tokens)
+        loop = asyncio.get_running_loop()
+        out_queue: asyncio.Queue[bytes | None] = asyncio.Queue()
 
-    def _generate_sync(self, prompt: str, max_tokens: int) -> GenerationResult:
-        prompt_tokens = self._llm.tokenize(prompt.encode("utf-8"))
-        output = self._llm.create_completion(prompt, max_tokens=max_tokens, stream=False)
-        assert isinstance(output, dict)  # stream=False rules out the Iterator branch
-        text = output["choices"][0]["text"]
-        completion_tokens = output["usage"]["completion_tokens"]
-        return GenerationResult(
-            text=text,
-            prompt_tokens=len(prompt_tokens),
-            completion_tokens=completion_tokens,
+        thread = threading.Thread(
+            target=self._stream_worker,
+            args=(prompt, max_tokens, is_cancelled, loop, out_queue),
+            daemon=True,
         )
+        thread.start()
+
+        while True:
+            chunk = await out_queue.get()
+            if chunk is None:
+                break
+            yield chunk
+
+    def _stream_worker(
+        self,
+        prompt: str,
+        max_tokens: int,
+        is_cancelled: Callable[[], bool],
+        loop: asyncio.AbstractEventLoop,
+        out_queue: "asyncio.Queue[bytes | None]",
+    ) -> None:
+        try:
+            prompt_tokens = self._llm.tokenize(prompt.encode("utf-8"))
+            all_tokens = list(prompt_tokens)
+            eos_token = self._llm.token_eos()
+
+            for count, token in enumerate(self._llm.generate(prompt_tokens), start=1):
+                if count > max_tokens or token == eos_token or is_cancelled():
+                    break
+                token_bytes = self._llm.detokenize([token], prev_tokens=all_tokens)
+                all_tokens.append(token)
+                loop.call_soon_threadsafe(out_queue.put_nowait, token_bytes)
+        finally:
+            loop.call_soon_threadsafe(out_queue.put_nowait, None)
