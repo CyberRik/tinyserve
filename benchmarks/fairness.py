@@ -34,9 +34,7 @@ LOW_PRIORITY = 1
 HIGH_PRIORITY = 5
 
 
-async def run(
-    base_url: str, n_low: int, n_high: int, max_tokens: int
-) -> list[RequestResult]:
+async def run(base_url: str, n_low: int, n_high: int, max_tokens: int) -> list[RequestResult]:
     async with httpx.AsyncClient(base_url=base_url) as client:
         low_tasks = [
             stream_generate(client, PROMPT, max_tokens, priority=LOW_PRIORITY, index=i)
@@ -81,8 +79,15 @@ def main() -> None:
         writer = csv.writer(f)
         if is_new:
             writer.writerow(
-                ["label", "low_mean_ttft", "low_max_ttft", "high_mean_ttft", "high_max_ttft",
-                 "n_low", "n_high"]
+                [
+                    "label",
+                    "low_mean_ttft",
+                    "low_max_ttft",
+                    "high_mean_ttft",
+                    "high_max_ttft",
+                    "n_low",
+                    "n_high",
+                ]
             )
         writer.writerow(
             [args.label, low_mean, low_max, high_mean, high_max, args.n_low, args.n_high]

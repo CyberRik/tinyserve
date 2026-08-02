@@ -108,8 +108,10 @@ def main() -> None:
         total = used[0] + free0
     print(f"{len(rows)} samples over ~{args.duration:.0f}s")
     if used:
-        print(f"kv_blocks_used: min={min(used):.0f} max={max(used):.0f} end={used[-1]:.0f}"
-              + (f"  (of {total:.0f} total)" if total else ""))
+        print(
+            f"kv_blocks_used: min={min(used):.0f} max={max(used):.0f} end={used[-1]:.0f}"
+            + (f"  (of {total:.0f} total)" if total else "")
+        )
     print(f"wrote {out_path}")
 
     try:

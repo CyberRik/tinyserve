@@ -49,19 +49,21 @@ def main() -> None:
     out_path = RESULTS_DIR / "single_request.csv"
     with out_path.open("w", newline="") as f:
         writer = csv.writer(f)
-        writer.writerow(
-            ["index", "status_code", "ttft_seconds", "total_seconds", "tokens_emitted"]
-        )
+        writer.writerow(["index", "status_code", "ttft_seconds", "total_seconds", "tokens_emitted"])
         for r in results:
             writer.writerow(
                 [r.index, r.status_code, r.ttft_seconds, r.total_seconds, r.tokens_emitted]
             )
 
     print(f"n={len(ok)}/{len(results)} succeeded")
-    print(f"TTFT     mean={statistics.mean(ttfts):.4f}s  p50={percentile(ttfts, 0.5):.4f}s  "
-          f"p95={percentile(ttfts, 0.95):.4f}s")
-    print(f"tok/sec  mean={statistics.mean(tps):.2f}  p50={percentile(tps, 0.5):.2f}  "
-          f"p95={percentile(tps, 0.95):.2f}")
+    print(
+        f"TTFT     mean={statistics.mean(ttfts):.4f}s  p50={percentile(ttfts, 0.5):.4f}s  "
+        f"p95={percentile(ttfts, 0.95):.4f}s"
+    )
+    print(
+        f"tok/sec  mean={statistics.mean(tps):.2f}  p50={percentile(tps, 0.5):.2f}  "
+        f"p95={percentile(tps, 0.95):.2f}"
+    )
     print(f"wrote {out_path}")
 
 
