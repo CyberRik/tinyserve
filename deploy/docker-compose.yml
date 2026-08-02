@@ -1,10 +1,27 @@
 services:
+  tinyserve:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    environment:
+      TINYSERVE_MODEL_PATH: /models/${MODEL_FILE:-qwen2.5-0.5b-instruct-q4_k_m.gguf}
+      TINYSERVE_SCHEDULING_POLICY: ${TINYSERVE_SCHEDULING_POLICY:-wfq}
+      TINYSERVE_CHUNK_SIZE: ${TINYSERVE_CHUNK_SIZE:-512}
+      TINYSERVE_N_SEQ_MAX: ${TINYSERVE_N_SEQ_MAX:-4}
+      TINYSERVE_N_CTX: ${TINYSERVE_N_CTX:-2048}
+    volumes:
+      - ../models:/models:ro
+    ports:
+      - "8000:8000"
+
   prometheus:
     image: prom/prometheus:v2.55.1
     volumes:
       - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
     ports:
       - "9090:9090"
+    depends_on:
+      - tinyserve
 
   grafana:
     image: grafana/grafana:11.3.1

@@ -4,8 +4,12 @@ global:
 scrape_configs:
   - job_name: tinyserve
     static_configs:
-      # host.docker.internal resolves to the Docker host from inside a
-      # container on Docker Desktop (Windows/Mac) — TinyServe itself runs
-      # as a plain host process, not another container (PRD Section 13:
-      # no Kubernetes, no microservices, for TinyServe's own deployment).
-      - targets: ["host.docker.internal:8000"]
+      # "tinyserve" is the compose service name, resolved via Docker's
+      # internal DNS — this is a demo convenience so the whole stack
+      # comes up with one `docker compose up`. It doesn't change PRD
+      # Section 13's production stance (no Kubernetes, no microservices
+      # for TinyServe's own deployment); running the server as a plain
+      # host process (see README) still works unmodified against this
+      # same Prometheus config if you swap the target back to
+      # host.docker.internal:8000.
+      - targets: ["tinyserve:8000"]

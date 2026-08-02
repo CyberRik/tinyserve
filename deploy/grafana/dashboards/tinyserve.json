@@ -119,6 +119,10 @@
         {
           "expr": "histogram_quantile(0.5, rate(tokens_per_second_bucket[1m]))",
           "legendFormat": "p50"
+        },
+        {
+          "expr": "histogram_quantile(0.99, rate(tokens_per_second_bucket[1m]))",
+          "legendFormat": "p99"
         }
       ]
     },

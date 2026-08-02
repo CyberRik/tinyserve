@@ -1,0 +1,4 @@
+distribution,n,avg_batch_utilization
+all_short,8,0.002072704081632653
+all_long,8,0.008131377551020409
+mixed,8,0.00510204081632653

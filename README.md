@@ -11,8 +11,33 @@ KV-cache design, observability plan, and the phased roadmap this project follows
 
 Phases 0-4 are done: repo/CI/tooling, streaming, real multi-sequence continuous batching
 with a block-based KV Cache Manager, pluggable scheduling (FIFO/Priority/WFQ) with chunked
-prefill and timeouts, and Prometheus metrics + OpenTelemetry tracing. See `PRD.md` Section 12
+prefill and timeouts, and Prometheus metrics + OpenTelemetry tracing. The benchmark suite
+(PRD Section 11) and architecture docs are also done — see `docs/architecture.md` for what's
+actually implemented (including honest deltas from the PRD) and `docs/benchmarks.md` for real
+measured numbers. Phase 5 (prefix caching, deadline-aware scheduling, WebSocket transport,
+SRPT) is explicitly optional stretch per the PRD and was not picked up. See `PRD.md` Section 12
 for the full roadmap.
+
+## Benchmarks
+
+`benchmarks/` has eight standalone scripts (PRD Section 11), each runnable directly against
+a running server and each writing a CSV (+ PNG where there's a natural x-axis) to
+`benchmarks/results/`:
+
+```bash
+uv run python benchmarks/single_request.py       # baseline TTFT / tokens-per-sec
+uv run python benchmarks/burst.py                # admission backpressure under burst traffic
+uv run python benchmarks/sustained_load.py        # KV usage / batch utilization over time
+uv run python benchmarks/throughput_scaling.py    # tokens/sec vs concurrent demand
+uv run python benchmarks/tail_latency.py --label x   # chunked prefill's effect on tail latency
+uv run python benchmarks/fairness.py --label x       # FIFO vs Priority vs WFQ head-to-head
+uv run python benchmarks/batch_efficiency.py      # batch_utilization vs request-size distribution
+uv run python benchmarks/kv_usage.py              # KV block occupancy over a sustained run
+```
+
+`tail_latency.py` and `fairness.py` compare server configurations (chunk size / scheduling
+policy), so they need multiple server instances — see the docstring at the top of each script
+for the exact invocations. Real results and interpretation: `docs/benchmarks.md`.
 
 ## Development
 
