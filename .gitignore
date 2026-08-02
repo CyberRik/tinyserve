@@ -6,3 +6,4 @@ __pycache__/
 .ruff_cache/
 *.gguf
 .env
+docs/demo-recording-guide.md
