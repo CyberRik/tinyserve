@@ -14,6 +14,7 @@ class Settings(BaseSettings):
     n_seq_max: int = 4
     kv_block_size: int = 16
     chunk_size: int = 512
+    max_queue_depth: int = 128
     scheduling_policy: str = "wfq"
     queue_timeout_seconds: float = 30.0
     generation_timeout_seconds: float = 120.0

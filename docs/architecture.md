@@ -45,7 +45,7 @@ llama.cpp state, matching PRD Section 4's single-consumer design.
 | Component | File | Notes |
 |---|---|---|
 | FastAPI app | `tinyserve/api/app.py` | routes + `batch_loop` + `lifespan` |
-| Admission Controller | `tinyserve/admission/controller.py` | worst-case `prompt_tokens + max_tokens` KV reservation at accept time |
+| Admission Controller | `tinyserve/admission/controller.py` | queue-depth backpressure (`max_queue_depth`) checked first, then worst-case `prompt_tokens + max_tokens` KV reservation |
 | Request Queue | `tinyserve/queue/request_queue.py` | reorderable waiting pool keyed by request id, not a plain FIFO |
 | Fairness bookkeeping | `tinyserve/queue/fairness.py` | `WeightedFairQueue` virtual-time math |
 | Scheduling policies | `tinyserve/scheduler/{base,fifo,priority,wfq}.py` | `SchedulingPolicy` Protocol + `create_policy()` factory |
@@ -73,6 +73,26 @@ fairness-class key and the weight, and a newcomer class adopts the
 current system minimum virtual finish time rather than starting at zero
 — this is what keeps a bursty high-priority class from being unfairly
 penalized just for showing up late.
+
+## Admission Controller — two checks, not three
+
+`AdmissionController.admit()` runs two independent, fail-fast checks
+before a request ever touches the queue: (1) reject if `queue_depth` is
+already at the configured `max_queue_depth` (`TINYSERVE_MAX_QUEUE_DEPTH`,
+default 128) — this is what stops a burst of many small-footprint
+requests from growing the waiting pool unboundedly even when none of them
+individually approach the KV budget; (2) reject if the worst-case
+`prompt_tokens + max_tokens` reservation doesn't fit in the KV Cache
+Manager's free blocks. Both return a `503` with `Retry-After` and a
+distinct `reason` label (`queue_full` vs `kv_cache_full`) on
+`admission_rejected_total`, so the two failure modes are distinguishable
+in metrics, not just in code.
+
+**Not implemented:** PRD Section 6.1 also describes a token-bucket rate
+limiter as part of this component's state. There is no rate limiting
+anywhere in this codebase — a client can be admitted as fast as queue
+depth and KV budget allow, with no per-client throttling. This is a real
+gap relative to the PRD, not a deferred stretch goal.
 
 ## KV Cache — logical accounting, not a physical allocator
 
@@ -120,6 +140,16 @@ actually dropped on the *next* batch tick, not instantly — interrupting
 an in-flight blocking `llama_decode()` call isn't something this design
 attempts, matching PRD Section 9's documented tradeoff.
 
+**Known gap:** `generation_timeout_seconds` is only checked in
+`batch_loop`'s per-sampled-token loop — i.e. only once a sequence has
+started producing decode tokens. A sequence still inside a long, multi-
+tick chunked prefill (no token sampled yet) is not checked against this
+timeout at all. In practice chunked prefill completes in a bounded number
+of ticks for any request `AdmissionController` would have accepted, so
+this doesn't hang, but the timeout's actual coverage is narrower than PRD
+Section 9's "wall-clock cap on total generation time" implies — it caps
+decode time, not prefill time.
+
 ## Observability
 
 Every scheduling decision in `batch_loop` emits a metric or a trace span
@@ -130,6 +160,14 @@ is a metric, not a per-request trace span, because a single
 and forcing that into a single-parent span shape would misrepresent what
 actually happened. See `docs/profiling-notes.md` for the real profiling
 session that cross-checks this metric against `py-spy` sampling data.
+
+**Not implemented:** PRD Section 10 also calls for structured (JSON),
+request-scoped logging — every log line carrying `request_id`/`trace_id`,
+plus scheduler-tick-scoped batch-composition logs. This codebase has
+exactly one logging call site (`logger.exception(...)` in `app.py`'s
+decode-error handler), using plain stdlib text logging with no structure
+and no request correlation. Metrics and tracing cover the "why was my
+request slow" question PRD Section 10 asks for; logging does not.
 
 ## What's out of scope (unchanged from the PRD)
 

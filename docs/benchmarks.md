@@ -53,12 +53,20 @@ claim, verified with a real number, not asserted.**
 
 Fixed request rate over a duration, sampling `/metrics` every second.
 A 15s run at 2 req/s produced 16 samples with `kv_blocks_used` moving
-between 3 and 6 blocks and no drift or leak — occupancy tracks demand and
-returns to baseline as requests complete, with no runaway growth over the
-window tested. Longer/heavier runs are left to the reader; the mechanism
-(interval-local delta of the cumulative `batch_utilization` histogram, not
-a since-start average, so short-term drift wouldn't get hidden) is the
-part worth re-using at scale.
+between 3 and 6 blocks, tracking demand and returning to baseline as
+requests completed, with no runaway growth over the window tested.
+
+**Scope of this claim, stated precisely:** 15 seconds is nowhere near
+long enough to claim "no memory leak" in the sense that phrase usually
+means — a slow leak (a handful of blocks per hour, say) would be
+invisible at this timescale. What this run actually demonstrates is that
+occupancy doesn't grow monotonically over *this* window; it is not
+evidence against a slow leak over minutes or hours. The mechanism
+(interval-local delta of the cumulative `batch_utilization` histogram,
+not a since-start average, so short-term drift wouldn't get hidden) is
+sound and worth reusing for a real multi-minute soak test — that longer
+run is what would actually be needed to make a leak-freedom claim, and it
+was not run here.
 
 ## 4. Throughput scaling (`throughput_scaling.py`)
 

@@ -189,7 +189,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.runtime = runtime
     app.state.queue = RequestQueue()
     app.state.streams = StreamManager()
-    app.state.admission = AdmissionController(kv_cache)
+    app.state.admission = AdmissionController(kv_cache, max_queue_depth=settings.max_queue_depth)
     app.state.metrics = metrics
     app.state.tracer = tracer
     app.state.batch_loop_task = asyncio.create_task(
@@ -253,7 +253,10 @@ async def generate(
 
     with tracer.span(request_id, "admission"):
         result = admission.admit(
-            request_id, prompt_tokens=len(prompt_tokens), max_tokens=body.max_tokens
+            request_id,
+            prompt_tokens=len(prompt_tokens),
+            max_tokens=body.max_tokens,
+            queue_depth=queue.depth(),
         )
     if not result.accepted:
         metrics.admission_rejected_total.labels(reason=result.reason).inc()
