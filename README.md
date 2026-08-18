@@ -191,20 +191,21 @@ diverges from the design doc: [`docs/architecture.md`](docs/architecture.md).
 | Chunked prefill | ✅ | Long prompts sliced into `chunk_size`-token pieces per tick; decode steps always sort first |
 | Admission control | ✅ | Queue-depth backpressure **and** KV-budget rejection, each with a distinct metric label |
 | Scheduling policies | ✅ | FIFO / Priority / WFQ, pluggable via `TINYSERVE_SCHEDULING_POLICY`, benchmarked head-to-head |
-| KV cache accounting | ✅ (logical only) | Block-based reserve/release over llama.cpp's native per-sequence KV API — no LRU eviction, no prefix caching (documented gaps, see below) |
+| KV cache accounting | ✅ (logical only) | Block-based reserve/release over llama.cpp's native per-sequence KV API — no LRU eviction, and the accounting is not sharing-aware (documented gaps, see below) |
+| Prefix caching | ✅ | Block-aligned radix tree in **C++** (`native/`, flat C ABI over ctypes) with a pure-Python fallback; reuses another sequence's KV cells via `llama_memory_seq_cp`. **47–70% of prompt tokens skipped** on a shared-system-prompt wave |
 | Streaming | ✅ | SSE, incremental UTF-8-safe detokenization |
 | Cancellation & timeouts | ✅ | Cooperative (bounded by one tick), client-disconnect detection, queue and generation timeouts |
 | Metrics | ✅ | Prometheus `/metrics` — admission, queue depth/wait, batch size/utilization, KV usage, TTFT, inter-token latency, decode duration, scheduler decisions, cancellations |
 | Tracing | ✅ | One OpenTelemetry trace per request, `admission` / `queue_wait` / `generation` child spans |
 | Structured logging | ❌ | Not implemented — see [`docs/architecture.md`](docs/architecture.md#observability) |
 | Rate limiting | ❌ | Not implemented — see [`docs/architecture.md`](docs/architecture.md#admission-controller--two-checks-not-three) |
-| Benchmarks | ✅ | 8 standalone scripts, real numbers, see below |
+| Benchmarks | ✅ | 9 standalone scripts, real numbers, see below |
 | Profiling | ✅ | Real `py-spy` session cross-checked against TinyServe's own metrics |
-| Prefix caching, deadline scheduling, WebSockets, SRPT | ⏸️ deferred | Explicit Phase 5 stretch goals, not picked up — see [`PRD.md`](PRD.md) §12 |
+| Deadline scheduling, WebSockets, SRPT | ⏸️ deferred | Remaining Phase 5 stretch goals — see [`PRD.md`](PRD.md) §12 |
 
 ## Benchmarks
 
-Eight standalone scripts in [`benchmarks/`](benchmarks/), each run against the real server and
+Nine standalone scripts in [`benchmarks/`](benchmarks/), each run against the real server and
 the real Qwen2.5-0.5B-Instruct Q4_K_M GGUF model — every number below is measured, not
 estimated. Full write-up with interpretation: [`docs/benchmarks.md`](docs/benchmarks.md).
 
@@ -347,9 +348,13 @@ every place the shipped code diverges from the design doc.
   design, observability plan, phased roadmap, and self-critique
 - [`docs/architecture.md`](docs/architecture.md) — what's actually implemented, kept in sync
   with the code, including every documented gap versus the PRD
-- [`docs/benchmarks.md`](docs/benchmarks.md) — all 8 benchmarks with real numbers and
+- [`docs/benchmarks.md`](docs/benchmarks.md) — all 9 benchmarks with real numbers and
   interpretation
-- [`docs/profiling-notes.md`](docs/profiling-notes.md) — the `py-spy` investigation
+- [`docs/profiling-notes.md`](docs/profiling-notes.md) — the `py-spy` investigation, and the
+  measurement behind *not* rewriting the Python layer in C++
+- [`native/README.md`](native/README.md) — the C++ prefix cache: why that layer is C++ when
+  the profiler says Python isn't the bottleneck, how to build it, and how the fallback is
+  held to identical behaviour
 
 ## License
 

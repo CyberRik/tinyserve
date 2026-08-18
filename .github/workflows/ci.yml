@@ -31,3 +31,57 @@ jobs:
 
       - name: Pytest (unit only)
         run: uv run pytest tests/unit -m "not slow"
+
+  # The C++ prefix cache builds and tests independently of Python: it has no
+  # Python and no llama.cpp in its dependency set, which is the whole point of
+  # the flat C ABI (see native/README.md). Keeping it a separate job means a
+  # broken tree fails on its own terms rather than as a mysterious ctypes error.
+  native:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        run: cmake -S native -B native/build -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build native/build --config Release
+
+      - name: C++ tests
+        run: ctest --test-dir native/build --output-on-failure
+
+  # Runs the Python suite *against a real shared library*, which the `test` job
+  # above cannot: without a build, every native-parametrised case skips and the
+  # ctypes differential fuzz never executes. This job is what actually holds the
+  # two backends to the same behaviour.
+  native-integration:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+
+      - name: Set up Python
+        run: uv python install 3.11
+
+      - name: Install dependencies
+        run: uv sync
+
+      - name: Build the prefix cache
+        run: |
+          cmake -S native -B native/build -DCMAKE_BUILD_TYPE=Release
+          cmake --build native/build --config Release
+
+      - name: Prefix cache tests, native backend live
+        run: uv run pytest tests/unit/test_prefix_cache.py tests/unit/test_prefix_cache_differential.py -v
+
+      - name: Fail if the native backend silently skipped
+        run: |
+          uv run python -c "
+          import sys
+          from tinyserve.prefix.cache import NativePrefixCache
+          if NativePrefixCache.load_library() is None:
+              sys.exit('native library built but not loadable -- the suite would have skipped')
+          print('native backend loaded')
+          "

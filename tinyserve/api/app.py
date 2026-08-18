@@ -28,6 +28,7 @@ from tinyserve.config import Settings
 from tinyserve.kv_cache.manager import KVCacheManager
 from tinyserve.observability.metrics import Metrics
 from tinyserve.observability.tracing import RequestTracer, configure_tracing
+from tinyserve.prefix.cache import PrefixCacheBase, create_prefix_cache
 from tinyserve.queue.request_queue import PendingRequest, RequestQueue
 from tinyserve.runtime.llama_runtime import LlamaRuntime
 from tinyserve.scheduler.base import SchedulingPolicy, create_policy
@@ -52,6 +53,7 @@ async def batch_loop(
     streams: StreamManager,
     kv_cache: KVCacheManager,
     policy: SchedulingPolicy,
+    prefix_cache: PrefixCacheBase | None,
     metrics: Metrics,
     tracer: RequestTracer,
     n_seq_max: int,
@@ -64,11 +66,47 @@ async def batch_loop(
     free_slots = list(range(n_seq_max))
     policy_name = type(policy).__name__
 
+    def _claim_prefix(request: PendingRequest, seq_id: int) -> int:
+        """Reuse another sequence's already-prefilled KV cells, if any overlap.
+
+        Returns how many of this prompt's leading tokens are now resident in
+        seq_id's cache and must therefore be skipped when building batches.
+        Zero means "prefill the whole prompt", i.e. exactly the old behaviour --
+        every failure path below falls back to it rather than to an error.
+        """
+        if prefix_cache is None:
+            return 0
+
+        hit = prefix_cache.match_for_reuse(request.prompt_tokens)
+        reused = 0
+        if hit and runtime.reuse_prefix(hit.seq_id, seq_id, hit.n_tokens):
+            reused = hit.n_tokens
+            metrics.prefill_tokens_reused_total.inc(reused)
+            metrics.prefix_cache_lookups_total.labels(outcome="hit").inc()
+        elif hit:
+            # The donor was freed between the lookup and the copy. A normal
+            # race under churn, not an error -- but worth its own label, since
+            # a high stale rate means sequences are finishing faster than the
+            # tree is being evicted and points at a real bug.
+            metrics.prefix_cache_lookups_total.labels(outcome="stale_donor").inc()
+        else:
+            metrics.prefix_cache_lookups_total.labels(outcome="miss").inc()
+
+        # Publish after matching, never before: a sequence must not be offered
+        # its own cells as a donor. Publishing at admission rather than at
+        # completion is deliberate -- these cells are committed the moment this
+        # sequence's prefill is scheduled, so later arrivals in the same burst
+        # can share them instead of every one of them prefilling in parallel.
+        prefix_cache.insert(request.prompt_tokens, seq_id)
+        metrics.prefix_cache_nodes.set(prefix_cache.node_count())
+        return reused
+
     def admit(request: PendingRequest) -> None:
         now = time.monotonic()
         seq_id = free_slots.pop()
+        n_past = _claim_prefix(request, seq_id)
         active[request.id] = ActiveSequence(
-            seq_id=seq_id, pending_tokens=request.prompt_tokens, n_past=0
+            seq_id=seq_id, pending_tokens=request.prompt_tokens[n_past:], n_past=n_past
         )
         requests[request.id] = _RequestState(
             seq_id=seq_id,
@@ -76,6 +114,7 @@ async def batch_loop(
             arrival_ts=request.arrival_ts,
             admitted_ts=now,
         )
+        metrics.prefill_tokens_total.inc(len(request.prompt_tokens))
         metrics.queue_wait_seconds.observe(now - request.arrival_ts)
         metrics.scheduler_policy_decision_total.labels(policy=policy_name, outcome="admitted").inc()
         tracer.end_span(request.id, "queue_wait")
@@ -83,6 +122,13 @@ async def batch_loop(
 
     def finish(request_id: str, *, cancel_reason: str | None) -> None:
         state = requests.pop(request_id)
+        # Evict before the slot returns to the pool. If a later request claimed
+        # this seq_id while the tree still advertised the old prompt under it,
+        # a match would copy from cells that had been freed and refilled with
+        # something else -- silently wrong output, not a crash.
+        if prefix_cache is not None:
+            prefix_cache.evict(state.seq_id)
+            metrics.prefix_cache_nodes.set(prefix_cache.node_count())
         runtime.free_sequence(state.seq_id)
         free_slots.append(state.seq_id)
         active.pop(request_id)
@@ -183,7 +229,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     )
     kv_cache = KVCacheManager(total_tokens=settings.n_ctx, block_size=settings.kv_block_size)
     policy = create_policy(settings.scheduling_policy)
+    prefix_cache: PrefixCacheBase | None = None
+    if settings.prefix_cache_enabled:
+        prefix_cache = create_prefix_cache(settings.kv_block_size)
     metrics = Metrics()
+    metrics.prefix_cache_backend_info.labels(
+        backend=prefix_cache.backend if prefix_cache else "disabled"
+    ).set(1)
     tracer = RequestTracer()
 
     app.state.runtime = runtime
@@ -199,6 +251,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             app.state.streams,
             kv_cache,
             policy,
+            prefix_cache,
             metrics,
             tracer,
             settings.n_seq_max,

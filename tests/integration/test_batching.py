@@ -21,7 +21,14 @@ pytestmark = [
 
 
 async def test_one_decode_call_advances_two_independent_sequences() -> None:
-    runtime = LlamaRuntime(str(MODEL_PATH), n_ctx=512, n_seq_max=2)
+    # `with`, not a bare constructor: the Runtime owns a model and a context
+    # over it with no guaranteed finalization order, so letting it fall to the
+    # collector can fault in __del__. See LlamaRuntime.close().
+    with LlamaRuntime(str(MODEL_PATH), n_ctx=512, n_seq_max=2) as runtime:
+        await _assert_one_decode_advances_both(runtime)
+
+
+async def _assert_one_decode_advances_both(runtime: LlamaRuntime) -> None:
     prompt_a = runtime.tokenize("The capital of France is")
     prompt_b = runtime.tokenize("Roses are red, violets are")
 

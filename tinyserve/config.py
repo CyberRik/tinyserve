@@ -16,5 +16,10 @@ class Settings(BaseSettings):
     chunk_size: int = 512
     max_queue_depth: int = 128
     scheduling_policy: str = "wfq"
+    # Prefix reuse across sequences (native/ radix tree, Python fallback).
+    # On by default: a miss costs one tree walk over the prompt and a hit
+    # removes prefill work outright. Set false to A/B it -- benchmarks/
+    # prefix_reuse.py drives exactly that comparison.
+    prefix_cache_enabled: bool = True
     queue_timeout_seconds: float = 30.0
     generation_timeout_seconds: float = 120.0

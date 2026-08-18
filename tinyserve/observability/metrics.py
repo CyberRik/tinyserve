@@ -68,6 +68,41 @@ class Metrics:
             "Wall time of each llama_decode() call",
             registry=self.registry,
         )
+        # PREFIX CACHE (Phase 5). prefill_tokens_reused_total is the metric the
+        # feature exists for -- it counts prompt tokens that never reached
+        # llama_decode() because their KV cells were copied from a sequence that
+        # had already prefilled them. Paired with prefill_tokens_total it gives
+        # a reuse rate directly, with no arithmetic on the dashboard.
+        self.prefix_cache_lookups_total = Counter(
+            "prefix_cache_lookups_total",
+            "Prefix-cache lookups performed at admission",
+            ["outcome"],
+            registry=self.registry,
+        )
+        self.prefill_tokens_total = Counter(
+            "prefill_tokens_total",
+            "Prompt tokens admitted, whether prefilled or reused",
+            registry=self.registry,
+        )
+        self.prefill_tokens_reused_total = Counter(
+            "prefill_tokens_reused_total",
+            "Prompt tokens skipped by copying another sequence's KV cells",
+            registry=self.registry,
+        )
+        self.prefix_cache_nodes = Gauge(
+            "prefix_cache_nodes",
+            "Live block-nodes in the prefix radix tree",
+            registry=self.registry,
+        )
+        # Labelled so a deployment that silently fell back to the pure-Python
+        # backend is visible on the dashboard rather than a mystery in a graph.
+        self.prefix_cache_backend_info = Gauge(
+            "prefix_cache_backend_info",
+            "1 for the prefix-cache backend actually in use",
+            ["backend"],
+            registry=self.registry,
+        )
+
         self.scheduler_policy_decision_total = Counter(
             "scheduler_policy_decision_total",
             "Scheduling admission decisions",

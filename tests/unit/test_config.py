@@ -19,6 +19,12 @@ def test_settings_env_override(monkeypatch) -> None:
     assert settings.port == 9001
 
 
-def test_settings_model_path_required() -> None:
+def test_settings_model_path_required(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Clear the env explicitly rather than trusting it to be unset. The
+    # integration tests set TINYSERVE_MODEL_PATH via os.environ and never undo
+    # it, so this test passed or failed depending on whether it ran before or
+    # after them in the same session -- invisible in CI, which runs tests/unit
+    # alone, and a confusing failure for anyone running the whole suite.
+    monkeypatch.delenv("TINYSERVE_MODEL_PATH", raising=False)
     with pytest.raises(ValidationError):
         Settings()

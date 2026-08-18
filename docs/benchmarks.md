@@ -1,6 +1,6 @@
 # Benchmarks
 
-PRD Section 11 deliverable: eight scripts in `benchmarks/`, each runnable
+PRD Section 11 deliverable: nine scripts in `benchmarks/`, each runnable
 standalone, each producing a CSV in `benchmarks/results/` (plus a PNG for
 the ones with a natural x-axis to sweep). Every number below is from an
 actual run against the real server and the real Qwen2.5-0.5B-Instruct
@@ -193,6 +193,54 @@ returns blocks to the free pool immediately, and there is no
 block occupancy only; there's no eviction-event count to show because
 there's no eviction. See `docs/architecture.md` for the full list of
 places the shipped code trims PRD scope.
+
+## 9. Prefix reuse under a shared system prompt (`prefix_reuse.py`)
+
+The workload prefix caching exists for: many concurrent requests sharing a long
+system preamble, differing only in a short question. Three waves of 8
+simultaneous requests, `n_seq_max=4`, `max_tokens=24`, run against two servers
+differing only in `TINYSERVE_PREFIX_CACHE_ENABLED`. Three paired invocations,
+identical prompt-token totals (1908) on both sides each time.
+
+| run | prefix cache | prompt tokens | reused | reuse rate | TTFT p50 | TTFT p95 |
+|---|---|---|---|---|---|---|
+| 1 | on  | 1908 | 1344 | **70.4%** | 1.040s | 1.807s |
+| 1 | off | 1908 | 0 | 0% | 2.001s | 3.865s |
+| 2 | on  | 1908 | 1280 | **67.1%** | 1.501s | 3.327s |
+| 2 | off | 1908 | 0 | 0% | 2.253s | 4.143s |
+| 3 | on  | 1908 | 896 | **47.0%** | 1.636s | 4.554s |
+| 3 | off | 1908 | 0 | 0% | 2.439s | 4.155s |
+
+**The headline is the reuse rate, not the latency.** `prefill_tokens_reused_total`
+is an exact counter of prompt tokens that never reached `llama_decode()` — work
+provably not done, not a sampled estimate. Between **47% and 70%** of prompt
+tokens were skipped.
+
+**Why the reuse rate varies so much across identical runs.** The prompts are
+identical every time; what differs is how many donors happen to be live at the
+moment each request is admitted. With `n_seq_max=4`, a wave of 8 is admitted in
+staggered groups, and a sequence's claim is evicted the instant it finishes.
+Run 3 also recorded 7 `stale_donor` lookups — donors freed between the tree
+lookup and the copy — which the batch loop correctly treats as a miss and
+prefills normally. So the spread is a property of *slot churn under this
+concurrency*, not of the cache, and it would narrow with more slots or longer
+generations.
+
+**TTFT p50 is consistently lower with the cache on** — 1.040/1.501/1.636s against
+2.001/2.253/2.439s, with no overlap between the two sets. That is a real effect
+and roughly a 1.4–1.9× improvement.
+
+**TTFT p95 supports no claim at all, and is included so that's visible.** On:
+1.807/3.327/4.554s. Off: 3.865/4.143/4.155s. The ranges overlap heavily and the
+best and worst p95 in the whole table are both from cache-on runs. At three
+waves of eight on a CPU build, the tail is dominated by queueing behind
+`n_seq_max=4`, and prefill savings do not separate from that noise. Establishing
+a p95 effect would need far more samples than this.
+
+**Caveat on scale.** This is a 0.5B model on CPU with a ~60-token preamble. The
+reuse *rate* is a property of the workload and would hold anywhere; what it is
+worth in latency scales with how expensive prefill actually is, which is much
+higher for a larger model or a longer system prompt.
 
 ## Reproducing these numbers
 

@@ -83,10 +83,19 @@ The PRD's original ask assumed a PyTorch/CUDA backend where
 `torch.profiler` and Nsight Systems are the standard tools. This build is
 CPU-only llama.cpp — there's no CUDA kernel timeline to capture. The
 correct tool in that world would be llama.cpp's own `llama_perf` timing
-breakdown (prompt-eval vs eval vs sampling time via its C API), which
-isn't wired into TinyServe's Python layer yet. That's a legitimate,
-scoped-out gap, not an oversight: if this project runs on a CUDA build in
-the future, that's where the next profiling pass starts.
+breakdown (prompt-eval vs eval vs sampling time via its C API).
+
+**Update (Phase 5): that gap is now closed.** `LlamaRuntime.perf_snapshot()`
+reads `llama_perf_context` directly, which splits the opaque 97.2% above into
+`t_p_eval_ms` (prompt eval) and `t_eval_ms` (token eval) — a split `py-spy`
+cannot see, because from Python both sit inside one `llama_decode()` frame. It
+also exposes `n_reused`, llama.cpp's own count of reused KV tokens, which is an
+*independent* check on the prefix cache's `prefill_tokens_reused_total`: two
+counters maintained by different code answering the same question, the same
+cross-validation trick used against the profiler above.
+
+Worth noting this needed no C++ — `llama_cpp` already exposes
+`llama_perf_context` through ctypes. It was a wiring gap, not a binding gap.
 
 ## What would change this finding
 
@@ -101,3 +110,35 @@ concurrency. It would look different with:
 - A GPU build, where `llama_decode()` becomes asynchronous from the CPU's
   perspective and the profiling question shifts to "is the GPU actually
   kept busy," which is a Nsight question, not a `py-spy` one.
+
+
+## Addendum: is the Python layer worth rewriting in C++?
+
+Asked directly, because Phase 5 added a C++ component and the question would
+otherwise hang over it.
+
+The batch-fill path — `_decode_sync`'s per-row loop writing `token`, `pos`,
+`n_seq_id`, `seq_id` and `logits` into the `llama_batch` struct through ctypes —
+is the most plausible candidate, being five ctypes attribute writes per row per
+tick. Measured directly against a real `llama_batch_init` allocation:
+
+| batch rows | ctypes fill | per row |
+|---|---|---|
+| 64 | 0.039 ms | 0.60 µs |
+| 256 | 0.156 ms | 0.61 µs |
+| 1024 | 0.641 ms | 0.63 µs |
+
+Against a 33.7 ms average decode, a **completely full** 1024-row tick spends
+**under 2%** of the tick filling the batch. The cost is linear in rows, so there
+is no concurrency at which this overtakes `llama_decode()` — more rows mean
+proportionally more matmul too.
+
+**So: no.** Rewriting TinyServe's Python bookkeeping in C++ would buy nothing
+measurable. This also settles the open item in "What would change this finding"
+above: Python-side bookkeeping was flagged there as needing re-measurement at
+higher concurrency, and it has now been measured at full batch capacity rather
+than assumed.
+
+The prefix cache added in Phase 5 is C++ for an unrelated reason — portability
+into llama.cpp's own C++ server — and its win is prefill work eliminated, not
+CPU cycles shaved. `native/README.md` has the argument in full.

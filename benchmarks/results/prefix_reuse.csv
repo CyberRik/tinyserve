@@ -1,0 +1,7 @@
+label,backend,requests,prompt_tokens,reused_tokens,reuse_rate_pct,hits,misses,stale_donor,ttft_p50,ttft_p95
+on,python,24,1908,1344,70.44,21,3,0,1.0403,1.8068
+off,disabled,24,1908,0,0.00,0,0,0,2.0012,3.8650
+on,python,24,1908,1280,67.09,41,6,1,1.5008,3.3266
+off,disabled,24,1908,0,0.00,0,0,0,2.2530,4.1434
+on,python,24,1908,896,46.96,55,10,7,1.6356,4.5535
+off,disabled,24,1908,0,0.00,0,0,0,2.4391,4.1555
