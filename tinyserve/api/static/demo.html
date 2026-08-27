@@ -1,0 +1,611 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TinyServe — live demo</title>
+<style>
+  /* Catppuccin Mocha, matching the terminal theme in docs/demo-recording-guide.md
+     so a capture of this page sits beside the terminal GIFs as one visual family. */
+  :root {
+    --base:#1e1e2e; --mantle:#181825; --crust:#11111b;
+    --surface0:#313244; --surface1:#45475a; --overlay0:#6c7086;
+    --text:#cdd6f4; --subtext:#a6adc8;
+    --green:#a6e3a1; --red:#f38ba8; --yellow:#f9e2af;
+    --blue:#89b4fa; --mauve:#cba6f7; --peach:#fab387; --teal:#94e2d5;
+    --mono:"JetBrains Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--base); color:var(--text);
+         font-family:var(--mono); font-size:14px; line-height:1.5; }
+  .wrap { max-width:1500px; margin:0 auto; padding:18px; }
+  .panel { background:var(--mantle); border:1px solid var(--surface0);
+           border-radius:8px; margin-bottom:12px; }
+
+  /* ---- top strip ---- */
+  .strip { display:flex; flex-wrap:wrap; align-items:center; gap:18px; padding:12px 16px; }
+  .brand { font-weight:700; font-size:16px; color:var(--mauve); }
+  .brand span { color:var(--overlay0); font-weight:400; font-size:11px; margin-left:7px; }
+  .spacer { margin-left:auto; }
+  .stat { display:flex; gap:6px; align-items:baseline; white-space:nowrap; }
+  .stat .k { color:var(--overlay0); font-size:11px; text-transform:uppercase; letter-spacing:.06em; }
+  .stat .v { font-variant-numeric:tabular-nums; }
+  .v.accepted { color:var(--green); } .v.rejected { color:var(--red); }
+  .v.streaming { color:var(--blue); }
+
+  /* ---- controls ---- */
+  .controls { display:flex; flex-wrap:wrap; align-items:end; gap:14px; padding:14px 16px; }
+  .field { display:flex; flex-direction:column; gap:5px; }
+  .field label { font-size:11px; color:var(--overlay0); text-transform:uppercase; letter-spacing:.06em; }
+  input, select {
+    background:var(--crust); color:var(--text); border:1px solid var(--surface1);
+    border-radius:5px; padding:7px 9px; font-family:var(--mono); font-size:14px; min-width:96px;
+  }
+  input:focus, select:focus { outline:none; border-color:var(--blue); }
+  button {
+    background:var(--mauve); color:var(--crust); border:0; border-radius:5px;
+    padding:9px 16px; font-family:var(--mono); font-size:14px; font-weight:700; cursor:pointer;
+  }
+  button:hover:not(:disabled) { filter:brightness(1.1); }
+  button:disabled { opacity:.4; cursor:not-allowed; }
+  button.alt { background:var(--teal); }
+  button.ghost { background:transparent; color:var(--subtext);
+                 border:1px solid var(--surface1); font-weight:400; }
+  .hint { font-size:11px; color:var(--overlay0); padding:0 16px 12px; }
+
+  /* ---- tallies ---- */
+  .tallies { display:flex; flex-wrap:wrap; gap:18px; padding:10px 16px; }
+
+  /* ---- compare table ---- */
+  table { width:100%; border-collapse:collapse; font-size:13px; }
+  th, td { text-align:left; padding:8px 16px; border-bottom:1px solid var(--surface0);
+           font-variant-numeric:tabular-nums; }
+  th { color:var(--overlay0); font-size:11px; text-transform:uppercase;
+       letter-spacing:.06em; font-weight:400; }
+  tr:last-child td { border-bottom:0; }
+  td.policy { color:var(--mauve); font-weight:700; }
+  .caption { padding:10px 16px 0; font-size:11px; color:var(--overlay0); }
+
+  /* ---- stream grid ---- */
+  .grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(250px,1fr)); gap:9px; }
+  .card { background:var(--mantle); border:1px solid var(--surface0); border-radius:8px;
+          padding:9px 11px; display:flex; flex-direction:column; min-height:142px; }
+  .card.streaming { border-color:var(--blue); }
+  .card.done      { border-color:var(--surface1); }
+  .card.rejected  { border-color:var(--red); }
+  .card-head { display:flex; align-items:center; gap:6px; margin-bottom:5px; }
+  .id { color:var(--overlay0); font-size:12px; }
+  .badge { font-size:10px; padding:1px 7px; border-radius:99px; font-weight:700;
+           letter-spacing:.05em; }
+  .badge.low  { background:var(--surface0); color:var(--subtext); }
+  .badge.high { background:var(--peach); color:var(--crust); }
+  .state { margin-left:auto; font-size:11px; color:var(--overlay0); }
+  .state.streaming { color:var(--blue); } .state.done { color:var(--green); }
+  .state.rejected  { color:var(--red); }  .state.error { color:var(--yellow); }
+  .timings { display:flex; gap:11px; font-size:11px; color:var(--overlay0);
+             margin-bottom:6px; font-variant-numeric:tabular-nums; }
+  .timings b { color:var(--subtext); font-weight:400; }
+  .text { flex:1; font-size:13px; white-space:pre-wrap; word-break:break-word;
+          overflow-y:auto; max-height:170px; }
+  .cursor { display:inline-block; width:7px; height:14px; background:var(--blue);
+            vertical-align:text-bottom; animation:blink 1s steps(2) infinite; }
+  @keyframes blink { 50% { opacity:0; } }
+  .reason { color:var(--red); font-size:12px; }
+  .reason small { color:var(--overlay0); display:block; margin-top:3px; }
+  .empty { color:var(--overlay0); text-align:center; padding:44px 20px; }
+
+  /* ---- log ---- */
+  .log-head { display:flex; align-items:center; gap:12px; padding:10px 16px;
+              border-bottom:1px solid var(--surface0); }
+  .log-head h2 { margin:0; font-size:12px; color:var(--overlay0);
+                 text-transform:uppercase; letter-spacing:.06em; font-weight:400; }
+  #log { margin:0; padding:12px 16px; max-height:260px; overflow-y:auto;
+         font-size:12px; line-height:1.65; white-space:pre-wrap; word-break:break-word; }
+  .lg-t { color:var(--overlay0); }
+  .lg-info { color:var(--subtext); }  .lg-ok { color:var(--green); }
+  .lg-warn { color:var(--yellow); }   .lg-err { color:var(--red); }
+  .lg-tok { color:var(--blue); }      .lg-hdr { color:var(--mauve); font-weight:700; }
+
+  footer { margin-top:18px; padding-top:12px; border-top:1px solid var(--surface0);
+           color:var(--overlay0); font-size:11.5px; line-height:1.7; }
+  footer b { color:var(--subtext); font-weight:400; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <!-- top strip: live server state, scraped from /config and /metrics -->
+  <div class="panel strip">
+    <div class="brand">TinyServe <span>live demo</span></div>
+    <div class="field" style="gap:3px">
+      <label for="policy">scheduling policy</label>
+      <select id="policy">
+        <option value="fifo">fifo</option>
+        <option value="priority">priority</option>
+        <option value="wfq">wfq</option>
+      </select>
+    </div>
+    <div class="spacer"></div>
+    <div class="stat"><span class="k">n_seq_max</span><span class="v" id="c-seq">–</span></div>
+    <div class="stat"><span class="k">queue</span><span class="v" id="m-queue">–</span></div>
+    <div class="stat"><span class="k">kv blocks</span><span class="v" id="m-kv">–</span></div>
+    <div class="stat"><span class="k">accepted</span><span class="v accepted" id="m-acc">–</span></div>
+    <div class="stat"><span class="k">rejected</span><span class="v rejected" id="m-rej">–</span></div>
+  </div>
+
+  <!-- controls -->
+  <div class="panel">
+    <div class="controls">
+      <div class="field">
+        <label for="n">requests</label>
+        <input id="n" type="number" min="1" max="64" value="16">
+      </div>
+      <div class="field">
+        <label for="mt">max_tokens</label>
+        <input id="mt" type="number" min="8" max="128" value="24">
+      </div>
+      <div class="field">
+        <label for="mix">priority mix</label>
+        <select id="mix">
+          <option value="flat">all low (p1)</option>
+          <option value="mixed" selected>3:1 low:high (p1/p5)</option>
+        </select>
+      </div>
+      <div class="field" style="flex:1;min-width:210px">
+        <label for="prompt">prompt</label>
+        <input id="prompt" type="text" style="width:100%"
+               value="Summarize the plot of a mystery novel in two sentences.">
+      </div>
+      <button id="send">Send burst</button>
+      <button id="compare" class="alt">Compare policies</button>
+      <button id="reset" class="ghost">Reset</button>
+    </div>
+    <div class="hint">
+      <b>Send burst</b> fires N concurrent requests at the current policy.
+      <b>Compare policies</b> runs the same burst under each policy in turn and tabulates
+      per-class TTFT — the single-server equivalent of <b>benchmarks/fairness.py</b>.
+    </div>
+  </div>
+
+  <!-- tallies -->
+  <div class="panel tallies">
+    <div class="stat"><span class="k">accepted</span><span class="v accepted" id="t-acc">0</span></div>
+    <div class="stat"><span class="k">rejected</span><span class="v rejected" id="t-rej">0</span></div>
+    <div class="stat"><span class="k">streaming</span><span class="v streaming" id="t-str">0</span></div>
+    <div class="stat"><span class="k">done</span><span class="v" id="t-done">0</span></div>
+    <div class="stat"><span class="k">tokens</span><span class="v" id="t-tok">0</span></div>
+    <div class="stat"><span class="k">elapsed</span><span class="v" id="t-el">0.0s</span></div>
+  </div>
+
+  <!-- comparison results (hidden until a compare run finishes) -->
+  <div class="panel" id="cmp-panel" style="display:none">
+    <div class="caption">
+      Mean time to first token by priority class, same burst per policy.
+      Ratio is low ÷ high, matching <b>benchmarks/fairness.py</b> — above 1.0x means
+      high-priority requests reached first token sooner.
+    </div>
+    <table>
+      <thead><tr>
+        <th>policy</th><th>accepted</th><th>rejected</th>
+        <th>low p1 mean TTFT</th><th>high p5 mean TTFT</th><th>ratio</th>
+      </tr></thead>
+      <tbody id="cmp-body"></tbody>
+    </table>
+  </div>
+
+  <!-- live streams -->
+  <div class="grid" id="grid">
+    <div class="empty">Press <b>Send burst</b> to fire concurrent requests.</div>
+  </div>
+
+  <!-- event log -->
+  <div class="panel" style="margin-top:12px">
+    <div class="log-head">
+      <h2>event log</h2>
+      <span class="spacer"></span>
+      <button class="ghost" id="copy-log">Copy</button>
+      <button class="ghost" id="clear-log">Clear</button>
+    </div>
+    <pre id="log"></pre>
+  </div>
+
+  <footer>
+    <b>Read these numbers as behaviour, not as benchmarks.</b>
+    Browsers cap concurrent connections per origin (~6 on HTTP/1.1), so a large burst does not
+    all reach the server at once — later requests wait in the browser, before admission control
+    ever sees them. That inflates TTFT here and under-counts rejections compared with
+    <b>benchmarks/burst.py</b>. TTFT shown is measured in the browser and includes paint; the
+    server's own <b>ttft_seconds</b> histogram is the accurate one. Published measurements live
+    in <b>docs/benchmarks.md</b>. Every card is one <b>POST /generate</b> with
+    <b>stream: true</b> — the same request <b>curl -N</b> makes.
+  </footer>
+</div>
+
+<script>
+(() => {
+  "use strict";
+
+  const $ = (id) => document.getElementById(id);
+  const grid = $("grid");
+
+  // benchmarks/fairness.py uses these exact values; the page matches them so a
+  // viewer can compare a run here against the published numbers directly.
+  const LOW_PRIORITY = 1;
+  const HIGH_PRIORITY = 5;
+  const MAX_LOG_LINES = 600;
+
+  let cards = [];
+  let running = false;
+  let logLines = [];
+  let logT0 = performance.now();
+  let elapsedTimer = null;
+
+  // ---------------- event log ----------------
+  function log(msg, cls) {
+    const t = ((performance.now() - logT0) / 1000).toFixed(3).padStart(7, " ");
+    logLines.push({ t, msg, cls: cls || "info" });
+    if (logLines.length > MAX_LOG_LINES) logLines = logLines.slice(-MAX_LOG_LINES);
+    const el = $("log");
+    // Stay pinned to the bottom only if the viewer is already there, so
+    // scrolling back through a burst isn't yanked away mid-read.
+    const pinned = el.scrollTop + el.clientHeight >= el.scrollHeight - 20;
+    el.innerHTML = logLines
+      .map((l) => '<span class="lg-t">[' + l.t + 's]</span> ' +
+                  '<span class="lg-' + l.cls + '">' + esc(l.msg) + "</span>")
+      .join("\n");
+    if (pinned) el.scrollTop = el.scrollHeight;
+  }
+
+  function esc(s) {
+    return String(s == null ? "" : s)
+      .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  }
+
+  // ---------------- SSE over fetch ----------------
+  // EventSource can't be used: it only issues GET, and /generate is POST.
+  // The server writes exactly `data: {token}\n\n`. Per SSE one leading space
+  // after `data:` belongs to the framing and must be stripped -- but only one,
+  // because tokens frequently begin with a space (" world"), and stripping
+  // both would run every word together.
+  function parseFrame(raw) {
+    let out = "";
+    for (const line of raw.split("\n")) {
+      if (line.startsWith("data:")) {
+        let v = line.slice(5);
+        if (v.startsWith(" ")) v = v.slice(1);
+        out += v;
+      }
+    }
+    return out;
+  }
+
+  async function streamOne(card) {
+    const started = performance.now();
+    let res;
+    try {
+      res = await fetch("/generate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          prompt: card.prompt, max_tokens: card.maxTokens,
+          stream: true, priority: card.priority,
+        }),
+      });
+    } catch (e) {
+      card.state = "error"; card.error = "connection failed";
+      log("#" + card.n + " connection failed — is the server running?", "err");
+      render(card); return;
+    }
+
+    if (res.status === 503) {
+      // Surface the server's own reason: which of the two independent
+      // admission checks fired is the interesting part.
+      let reason = "rejected";
+      try {
+        const body = await res.json();
+        reason = (body && body.detail && body.detail.reason) || reason;
+      } catch (_) { /* non-JSON body: keep default */ }
+      card.state = "rejected"; card.reason = reason;
+      log("#" + card.n + " rejected 503 " + reason, "warn");
+      render(card); return;
+    }
+    if (!res.ok || !res.body) {
+      card.state = "error"; card.error = "HTTP " + res.status;
+      log("#" + card.n + " HTTP " + res.status, "err");
+      render(card); return;
+    }
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = "";
+    for (;;) {
+      let chunk;
+      try { chunk = await reader.read(); }
+      catch (e) {
+        card.state = "error"; card.error = "stream interrupted";
+        log("#" + card.n + " stream interrupted", "err");
+        render(card); return;
+      }
+      if (chunk.done) break;        // no [DONE] sentinel: close means complete
+      buf += decoder.decode(chunk.value, { stream: true });
+      let i;
+      while ((i = buf.indexOf("\n\n")) !== -1) {
+        const text = parseFrame(buf.slice(0, i));
+        buf = buf.slice(i + 2);
+        if (!text) continue;
+        if (card.ttft === null) {
+          card.ttft = performance.now() - started;
+          card.state = "streaming";
+          log("#" + card.n + " first token @ " + Math.round(card.ttft) + "ms (p" +
+              card.priority + ")", "tok");
+        }
+        card.text += text; card.tokens += 1;
+        render(card);
+      }
+    }
+    card.state = "done";
+    card.elapsed = performance.now() - started;
+    const tps = card.tokens / (card.elapsed / 1000);
+    log("#" + card.n + " done — " + card.tokens + " tok in " +
+        (card.elapsed / 1000).toFixed(2) + "s (" + tps.toFixed(1) + " tok/s)", "ok");
+    log("#" + card.n + " response: " + JSON.stringify(card.text));
+    render(card);
+  }
+
+  // ---------------- rendering ----------------
+  function render(card) {
+    const el = card.el;
+    el.className = "card " + card.state;
+    const tps = (card.elapsed && card.tokens)
+      ? (card.tokens / (card.elapsed / 1000)).toFixed(1) : null;
+
+    let body;
+    if (card.state === "rejected") {
+      body = '<div class="reason">503 ' + esc(card.reason) +
+             '<small>admission control rejected this request</small></div>';
+    } else if (card.state === "error") {
+      body = '<div class="reason">' + esc(card.error) + "</div>";
+    } else {
+      body = '<div class="text">' + esc(card.text) +
+             (card.state === "streaming" ? '<span class="cursor"></span>' : "") + "</div>";
+    }
+
+    el.innerHTML =
+      '<div class="card-head"><span class="id">#' + card.n + "</span>" +
+      '<span class="badge ' + (card.priority >= HIGH_PRIORITY ? "high" : "low") + '">p' +
+      card.priority + "</span>" +
+      '<span class="state ' + card.state + '">' + card.state + "</span></div>" +
+      '<div class="timings"><span>ttft <b>' +
+      (card.ttft === null ? "–" : Math.round(card.ttft) + "ms") + "</b></span>" +
+      "<span>tok <b>" + card.tokens + "</b></span>" +
+      (tps ? "<span>tok/s <b>" + tps + "</b></span>" : "") + "</div>" + body;
+
+    updateTallies();
+  }
+
+  function updateTallies() {
+    let acc = 0, rej = 0, str = 0, done = 0, tok = 0;
+    for (const c of cards) {
+      if (c.state === "rejected") rej++;
+      else if (c.state !== "error") acc++;
+      if (c.state === "streaming") str++;
+      if (c.state === "done") done++;
+      tok += c.tokens;
+    }
+    $("t-acc").textContent = acc;   $("t-rej").textContent = rej;
+    $("t-str").textContent = str;   $("t-done").textContent = done;
+    $("t-tok").textContent = tok;
+  }
+
+  // ---------------- burst ----------------
+  function readOpts() {
+    return {
+      n: clamp(parseInt($("n").value, 10) || 1, 1, 64),
+      maxTokens: clamp(parseInt($("mt").value, 10) || 24, 8, 128),
+      mixed: $("mix").value === "mixed",
+      prompt: $("prompt").value.trim() ||
+              "Summarize the plot of a mystery novel in two sentences.",
+    };
+  }
+  const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+
+  // Runs one burst to completion and returns its per-class stats.
+  async function runBurst(opts, policyName) {
+    cards = []; grid.innerHTML = "";
+    const t0 = performance.now();
+    log("burst: " + opts.n + " requests, max_tokens=" + opts.maxTokens +
+        ", policy=" + policyName + ", mix=" + (opts.mixed ? "3:1 low:high" : "all low"), "hdr");
+
+    for (let i = 0; i < opts.n; i++) {
+      const el = document.createElement("div");
+      el.className = "card queued";
+      grid.appendChild(el);
+      const card = {
+        n: i + 1, el, prompt: opts.prompt, maxTokens: opts.maxTokens,
+        // every 4th request is high priority: the 3:1 split fairness.py uses
+        priority: opts.mixed && i % 4 === 3 ? HIGH_PRIORITY : LOW_PRIORITY,
+        state: "queued", text: "", tokens: 0, ttft: null,
+        elapsed: 0, reason: "", error: "",
+      };
+      cards.push(card); render(card);
+    }
+
+    clearInterval(elapsedTimer);
+    elapsedTimer = setInterval(() => {
+      $("t-el").textContent = ((performance.now() - t0) / 1000).toFixed(1) + "s";
+    }, 100);
+
+    // Fire concurrently. Awaiting one at a time would serialize the burst in
+    // the client and destroy the entire point of the demo.
+    await Promise.all(cards.map(streamOne));
+
+    clearInterval(elapsedTimer);
+    const total = (performance.now() - t0) / 1000;
+    $("t-el").textContent = total.toFixed(1) + "s";
+
+    const mean = (xs) => (xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : null);
+    const lowT = cards.filter((c) => c.priority === LOW_PRIORITY && c.ttft !== null)
+                      .map((c) => c.ttft);
+    const highT = cards.filter((c) => c.priority === HIGH_PRIORITY && c.ttft !== null)
+                       .map((c) => c.ttft);
+    const stats = {
+      policy: policyName,
+      accepted: cards.filter((c) => c.state === "done" || c.state === "streaming").length,
+      rejected: cards.filter((c) => c.state === "rejected").length,
+      lowMean: mean(lowT), highMean: mean(highT),
+      tokens: cards.reduce((a, c) => a + c.tokens, 0), seconds: total,
+    };
+    log("burst complete: " + stats.accepted + " accepted, " + stats.rejected +
+        " rejected, " + stats.tokens + " tokens in " + total.toFixed(2) + "s", "hdr");
+    return stats;
+  }
+
+  async function setPolicy(name) {
+    const res = await fetch("/config/policy", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ policy: name }),
+    });
+    if (!res.ok) throw new Error("policy swap failed: HTTP " + res.status);
+    log("policy -> " + name, "hdr");
+    $("policy").value = name;
+    return res.json();
+  }
+
+  function setBusy(v) {
+    running = v;
+    ["send", "compare", "policy"].forEach((k) => ($(k).disabled = v));
+  }
+
+  async function onSend() {
+    if (running) return;
+    setBusy(true);
+    try { await runBurst(readOpts(), $("policy").value); }
+    finally { setBusy(false); }
+  }
+
+  // Runs the identical burst under every policy in turn. This is the
+  // single-server equivalent of benchmarks/fairness.py's three-server setup:
+  // the policy is hot-swapped between runs rather than baked in at startup.
+  async function onCompare() {
+    if (running) return;
+    setBusy(true);
+    const opts = readOpts();
+    const original = $("policy").value;
+    const rows = [];
+    $("cmp-body").innerHTML = "";
+    $("cmp-panel").style.display = "block";
+    try {
+      for (const name of ["fifo", "priority", "wfq"]) {
+        await setPolicy(name);
+        // Let in-flight sequences from the previous run drain, so the next
+        // burst starts against an idle KV cache rather than a busy one.
+        await idle();
+        rows.push(await runBurst(opts, name));
+        renderCompare(rows);
+      }
+      log("comparison complete", "hdr");
+    } catch (e) {
+      log("comparison aborted: " + e.message, "err");
+    } finally {
+      try { await setPolicy(original); } catch (_) { /* leave as-is */ }
+      setBusy(false);
+    }
+  }
+
+  // Poll /metrics until the queue drains, rather than sleeping a guessed
+  // interval -- capped so a stuck server can't hang the comparison.
+  async function idle(maxMs = 8000) {
+    const deadline = performance.now() + maxMs;
+    for (;;) {
+      if (performance.now() > deadline) return;
+      try {
+        const body = await (await fetch("/metrics")).text();
+        if (readMetric(body, "queue_depth") === 0) return;
+      } catch (_) { return; }
+      await new Promise((r) => setTimeout(r, 250));
+    }
+  }
+
+  function renderCompare(rows) {
+    const ms = (v) => (v === null ? "–" : Math.round(v) + "ms");
+    $("cmp-body").innerHTML = rows.map((r) => {
+      const ratio = (r.lowMean && r.highMean) ? (r.lowMean / r.highMean).toFixed(2) + "x" : "–";
+      return "<tr><td class='policy'>" + r.policy + "</td><td>" + r.accepted +
+             "</td><td>" + r.rejected + "</td><td>" + ms(r.lowMean) +
+             "</td><td>" + ms(r.highMean) + "</td><td>" + ratio + "</td></tr>";
+    }).join("");
+  }
+
+  // ---------------- /config + /metrics ----------------
+  function readMetric(body, name) {
+    const re = new RegExp("^" + name + "(?:\\{[^}]*\\})?\\s+([0-9.eE+-]+)$", "m");
+    const m = body.match(re);
+    return m ? Number(m[1]) : null;
+  }
+  function sumMetric(body, name) {
+    const re = new RegExp("^" + name + "(?:\\{[^}]*\\})?\\s+([0-9.eE+-]+)$", "gm");
+    let total = null, m;
+    while ((m = re.exec(body)) !== null) total = (total || 0) + Number(m[1]);
+    return total;
+  }
+  const fmt = (v) => (v === null ? "–" : (Number.isInteger(v) ? v : v.toFixed(1)));
+
+  async function pollMetrics() {
+    try {
+      const res = await fetch("/metrics");
+      if (!res.ok) return;
+      const body = await res.text();
+      const used = readMetric(body, "kv_blocks_used");
+      const free = readMetric(body, "kv_blocks_free");
+      $("m-queue").textContent = fmt(readMetric(body, "queue_depth"));
+      $("m-kv").textContent = (used === null || free === null) ? "–" : used + "/" + (used + free);
+      $("m-acc").textContent = fmt(readMetric(body, "admission_accepted_total"));
+      $("m-rej").textContent = fmt(sumMetric(body, "admission_rejected_total"));
+    } catch (_) { /* server down or restarting: keep last values */ }
+  }
+
+  async function loadConfig() {
+    try {
+      const cfg = await (await fetch("/config")).json();
+      $("policy").value = cfg.scheduling_policy;
+      $("c-seq").textContent = cfg.n_seq_max;
+      log("connected — policy=" + cfg.scheduling_policy + " n_seq_max=" + cfg.n_seq_max +
+          " n_ctx=" + cfg.n_ctx + " max_queue_depth=" + cfg.max_queue_depth +
+          " prefix_cache=" + cfg.prefix_cache_enabled, "hdr");
+      log("model: " + cfg.model_path);
+    } catch (e) {
+      log("could not read /config — is the server running?", "err");
+    }
+  }
+
+  // ---------------- wiring ----------------
+  $("send").addEventListener("click", onSend);
+  $("compare").addEventListener("click", onCompare);
+  $("policy").addEventListener("change", (e) => {
+    setPolicy(e.target.value).catch((err) => log(err.message, "err"));
+  });
+  $("reset").addEventListener("click", () => {
+    if (running) return;
+    cards = [];
+    grid.innerHTML = '<div class="empty">Press <b>Send burst</b> to fire concurrent requests.</div>';
+    ["t-acc", "t-rej", "t-str", "t-done", "t-tok"].forEach((k) => ($(k).textContent = "0"));
+    $("t-el").textContent = "0.0s";
+    $("cmp-panel").style.display = "none";
+  });
+  $("clear-log").addEventListener("click", () => {
+    logLines = []; logT0 = performance.now(); $("log").innerHTML = "";
+  });
+  $("copy-log").addEventListener("click", () => {
+    const txt = logLines.map((l) => "[" + l.t + "s] " + l.msg).join("\n");
+    navigator.clipboard.writeText(txt)
+      .then(() => log("log copied to clipboard"))
+      .catch(() => log("clipboard blocked by browser", "warn"));
+  });
+
+  loadConfig();
+  pollMetrics();
+  setInterval(pollMetrics, 1000);
+})();
+</script>
+</body>
+</html>

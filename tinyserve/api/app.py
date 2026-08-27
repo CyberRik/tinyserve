@@ -16,13 +16,19 @@ import uuid
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request, Response
-from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
 from tinyserve.admission.controller import AdmissionController
-from tinyserve.api.schemas import GenerateRequest, GenerateResponse
+from tinyserve.api.schemas import (
+    ConfigResponse,
+    GenerateRequest,
+    GenerateResponse,
+    PolicyRequest,
+)
 from tinyserve.batch.builder import ActiveSequence, build_batch
 from tinyserve.config import Settings
 from tinyserve.kv_cache.manager import KVCacheManager
@@ -47,12 +53,32 @@ class _RequestState:
     last_token_ts: float | None = None
 
 
+@dataclass
+class ActivePolicy:
+    """The scheduling policy in force, behind one level of indirection.
+
+    The batch loop reads this every tick instead of closing over a policy
+    object, so POST /config/policy can swap the policy on a running server.
+    That exists so the FIFO-vs-WFQ comparison can be driven from one server
+    instead of two on different ports (docs/demo-page-prd.md Section 5).
+    Swapping only affects requests admitted after the swap -- sequences
+    already holding a slot run to completion under the old policy.
+    """
+
+    policy: SchedulingPolicy
+    name: str
+
+    def set(self, name: str) -> None:
+        self.policy = create_policy(name)
+        self.name = name
+
+
 async def batch_loop(
     queue: RequestQueue,
     runtime: LlamaRuntime,
     streams: StreamManager,
     kv_cache: KVCacheManager,
-    policy: SchedulingPolicy,
+    active_policy: ActivePolicy,
     prefix_cache: PrefixCacheBase | None,
     metrics: Metrics,
     tracer: RequestTracer,
@@ -64,7 +90,6 @@ async def batch_loop(
     active: dict[str, ActiveSequence] = {}  # request_id -> sequence state
     requests: dict[str, _RequestState] = {}  # request_id -> timing/budget state
     free_slots = list(range(n_seq_max))
-    policy_name = type(policy).__name__
 
     def _claim_prefix(request: PendingRequest, seq_id: int) -> int:
         """Reuse another sequence's already-prefilled KV cells, if any overlap.
@@ -116,7 +141,9 @@ async def batch_loop(
         )
         metrics.prefill_tokens_total.inc(len(request.prompt_tokens))
         metrics.queue_wait_seconds.observe(now - request.arrival_ts)
-        metrics.scheduler_policy_decision_total.labels(policy=policy_name, outcome="admitted").inc()
+        metrics.scheduler_policy_decision_total.labels(
+            policy=active_policy.name, outcome="admitted"
+        ).inc()
         tracer.end_span(request.id, "queue_wait")
         tracer.start_span(request.id, "generation")
 
@@ -164,7 +191,7 @@ async def batch_loop(
         metrics.kv_blocks_used.set(kv_cache.total_blocks() - kv_cache.available_blocks())
 
         if free_slots:
-            for request in policy.select(queue.waiting(), capacity=len(free_slots)):
+            for request in active_policy.policy.select(queue.waiting(), capacity=len(free_slots)):
                 queue.remove(request.id)
                 admit(request)
 
@@ -228,7 +255,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         model_path=settings.model_path, n_ctx=settings.n_ctx, n_seq_max=settings.n_seq_max
     )
     kv_cache = KVCacheManager(total_tokens=settings.n_ctx, block_size=settings.kv_block_size)
-    policy = create_policy(settings.scheduling_policy)
+    active_policy = ActivePolicy(
+        policy=create_policy(settings.scheduling_policy), name=settings.scheduling_policy
+    )
     prefix_cache: PrefixCacheBase | None = None
     if settings.prefix_cache_enabled:
         prefix_cache = create_prefix_cache(settings.kv_block_size)
@@ -244,13 +273,15 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.admission = AdmissionController(kv_cache, max_queue_depth=settings.max_queue_depth)
     app.state.metrics = metrics
     app.state.tracer = tracer
+    app.state.active_policy = active_policy
+    app.state.settings = settings
     app.state.batch_loop_task = asyncio.create_task(
         batch_loop(
             app.state.queue,
             runtime,
             app.state.streams,
             kv_cache,
-            policy,
+            active_policy,
             prefix_cache,
             metrics,
             tracer,
@@ -268,9 +299,58 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 app = FastAPI(title="TinyServe", lifespan=lifespan)
 
 
+_DEMO_PAGE = Path(__file__).parent / "static" / "demo.html"
+
+
 @app.get("/healthz")
 async def healthz() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.get("/config")
+async def get_config(http_request: Request) -> ConfigResponse:
+    """The server's live configuration, so the demo page can display real
+    values instead of restating defaults that may not match how it was
+    started."""
+    settings: Settings = http_request.app.state.settings
+    active_policy: ActivePolicy = http_request.app.state.active_policy
+    return ConfigResponse(
+        scheduling_policy=active_policy.name,
+        n_seq_max=settings.n_seq_max,
+        n_ctx=settings.n_ctx,
+        kv_block_size=settings.kv_block_size,
+        max_queue_depth=settings.max_queue_depth,
+        prefix_cache_enabled=settings.prefix_cache_enabled,
+        model_path=settings.model_path,
+    )
+
+
+@app.post("/config/policy")
+async def set_policy(body: PolicyRequest, http_request: Request) -> ConfigResponse:
+    """Hot-swap the scheduling policy.
+
+    Deliberately unauthenticated, like every other route here: this runtime
+    binds to localhost and is a teaching/demo artifact, not a deployed
+    service (see PRD Section 3 non-goals). Do not expose it publicly.
+    """
+    active_policy: ActivePolicy = http_request.app.state.active_policy
+    try:
+        active_policy.set(body.policy)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail={"reason": str(exc)}) from None
+    return await get_config(http_request)
+
+
+@app.get("/demo", include_in_schema=False)
+async def demo_page() -> FileResponse:
+    """Static demo client (docs/demo-page-prd.md).
+
+    Served from the app rather than opened as a file:// page purely so it
+    shares an origin with /generate -- the alternative was adding permissive
+    CORS to the real server for a demo's benefit. Adds no runtime behaviour;
+    it drives the same public endpoint curl does.
+    """
+    return FileResponse(_DEMO_PAGE, media_type="text/html")
 
 
 @app.get("/metrics")

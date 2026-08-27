@@ -12,3 +12,19 @@ class GenerateRequest(BaseModel):
 
 class GenerateResponse(BaseModel):
     text: str
+
+
+class PolicyRequest(BaseModel):
+    policy: str = Field(min_length=1)
+
+
+class ConfigResponse(BaseModel):
+    """Live server configuration, surfaced for the demo page (GET /config)."""
+
+    scheduling_policy: str
+    n_seq_max: int
+    n_ctx: int
+    kv_block_size: int
+    max_queue_depth: int
+    prefix_cache_enabled: bool
+    model_path: str
