@@ -208,6 +208,16 @@ page's default prompts are prose that does not depend on line breaks.
   `benchmarks/burst.py` does — later ones queue *in the browser*, before ever reaching admission
   control. This inflates apparent TTFT and *understates* rejection counts. The page must say so
   in a footer rather than let a viewer read its numbers as benchmark-grade.
+- **The KV rejection path is effectively unreachable from a browser at demo settings.** Measured
+  at ~6 concurrent: `max_tokens` of 24–256 yields **zero** rejections, because each request
+  reserves only `ceil((prompt + max_tokens)/16)` blocks — roughly 3 of 128 at `max_tokens=24`, so
+  ~18/128 blocks are in use at full browser concurrency. `kv_cache_full` first appears at
+  `max_tokens=400` (4 accepted / 2 rejected) and reaches 1/5 at `max_tokens=1024` — all of which
+  mean 30-second generations, unusable in a recording. **Consequence:** demonstrating admission
+  control from the page requires the *queue-depth* check (`TINYSERVE_MAX_QUEUE_DEPTH=3`), which
+  fires realistically on small requests; the *KV-budget* check belongs to a terminal recording of
+  `benchmarks/burst.py`, which has no connection cap. This is why the recording guide keeps the
+  burst demo in a terminal rather than moving it here.
 - **Browser-side timings.** TTFT here includes browser scheduling and paint; the server's own
   `ttft_seconds` histogram is the accurate one.
 - Consequently: numbers on this page are *illustrative of behaviour*, and `docs/benchmarks.md`
