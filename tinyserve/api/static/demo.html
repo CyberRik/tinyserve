@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>TinyServe — live demo</title>
 <style>
-  /* Catppuccin Mocha, matching the terminal theme in docs/demo-recording-guide.md
+  /* Catppuccin Mocha, matching the terminal theme of the demo GIFs
      so a capture of this page sits beside the terminal GIFs as one visual family. */
   :root {
     --base:#1e1e2e; --mantle:#181825; --crust:#11111b;
@@ -154,7 +154,7 @@
       <div class="field" style="flex:1;min-width:210px">
         <label for="prompt">prompt</label>
         <input id="prompt" type="text" style="width:100%"
-               value="Summarize the plot of a mystery novel in two sentences.">
+               value="Summarize the plot of a {genre} novel in two sentences.">
       </div>
       <button id="send">Send burst</button>
       <button id="compare" class="alt">Compare policies</button>
@@ -162,8 +162,9 @@
     </div>
     <div class="hint">
       <b>Send burst</b> fires N concurrent requests at the current policy.
-      <b>Compare policies</b> runs the same burst under each policy in turn and tabulates
-      per-class TTFT — the single-server equivalent of <b>benchmarks/fairness.py</b>.
+      <b>{genre}</b> in the prompt is swapped for a different genre on each request, so every
+      stream is visibly independent; remove it to send one identical prompt to all.
+      <b>Compare policies</b> runs a fixed 6-request burst under each policy in turn.
     </div>
   </div>
 
@@ -180,9 +181,13 @@
   <!-- comparison results (hidden until a compare run finishes) -->
   <div class="panel" id="cmp-panel" style="display:none">
     <div class="caption">
-      Mean time to first token by priority class, same burst per policy.
-      Ratio is low ÷ high, matching <b>benchmarks/fairness.py</b> — above 1.0x means
-      high-priority requests reached first token sooner.
+      Each policy gets the same 6 requests: 4 low-priority (p1) sent first, then 2
+      high-priority (p5) — the same low-first order as <b>benchmarks/fairness.py</b>.
+      Six, because a browser opens at most 6 connections to one site: any more and the extras
+      wait inside the browser, where the server's scheduler can't see them.
+      Ratio is low ÷ high mean time to first token — above 1.0x means the high-priority pair
+      got through sooner. FIFO makes them wait behind everyone, Priority lets them skip the
+      whole line, WFQ lets them past some but not all of it.
     </div>
     <table>
       <thead><tr>
@@ -404,10 +409,21 @@
       maxTokens: clamp(parseInt($("mt").value, 10) || 24, 8, 128),
       mixed: $("mix").value === "mixed",
       prompt: $("prompt").value.trim() ||
-              "Summarize the plot of a mystery novel in two sentences.",
+              "Summarize the plot of a {genre} novel in two sentences.",
+      highLast: 0,   // Compare overrides this; Send burst uses the 3:1 spread
     };
   }
   const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+
+  // Same prompt shape for every request (so TTFTs stay comparable across
+  // classes), different subject (so answers differ). With one fixed prompt the
+  // model returns word-for-word identical text for every card, which reads as
+  // one response copied N times.
+  const GENRES = ["mystery", "science fiction", "romance", "fantasy", "horror",
+    "western", "thriller", "historical", "comedy", "adventure", "dystopian", "spy",
+    "crime", "fairy-tale", "war", "coming-of-age"];
+  const promptFor = (template, i) =>
+    template.split("{genre}").join(GENRES[i % GENRES.length]);
 
   // Runs one burst to completion and returns its per-class stats.
   async function runBurst(opts, policyName) {
@@ -421,9 +437,12 @@
       el.className = "card queued";
       grid.appendChild(el);
       const card = {
-        n: i + 1, el, prompt: opts.prompt, maxTokens: opts.maxTokens,
-        // every 4th request is high priority: the 3:1 split fairness.py uses
-        priority: opts.mixed && i % 4 === 3 ? HIGH_PRIORITY : LOW_PRIORITY,
+        n: i + 1, el, prompt: promptFor(opts.prompt, i), maxTokens: opts.maxTokens,
+        // Compare: the last `highLast` requests are high priority, sent after the
+        // low ones as in fairness.py. Send burst: every 4th, a 3:1 spread.
+        priority: opts.highLast
+          ? (i >= opts.n - opts.highLast ? HIGH_PRIORITY : LOW_PRIORITY)
+          : (opts.mixed && i % 4 === 3 ? HIGH_PRIORITY : LOW_PRIORITY),
         state: "queued", text: "", tokens: 0, ttft: null,
         elapsed: 0, reason: "", error: "",
       };
@@ -483,13 +502,22 @@
     finally { setBusy(false); }
   }
 
-  // Runs the identical burst under every policy in turn. This is the
-  // single-server equivalent of benchmarks/fairness.py's three-server setup:
-  // the policy is hot-swapped between runs rather than baked in at startup.
+  // Runs the identical burst under every policy in turn, hot-swapping the
+  // policy between runs instead of starting one server per policy the way
+  // benchmarks/fairness.py does.
+  //
+  // Deliberately 6 requests, not the burst size from the controls. A browser
+  // allows ~6 HTTP/1.1 connections per origin and queues the rest itself, in
+  // creation order. At 16 requests, 10 wait inside the browser's own FIFO,
+  // where no server policy can reach them, and the three policies measure
+  // nearly the same (observed: 0.82x / 1.22x / 1.12x). At 6, every request
+  // reaches the server together, 2 hold the slots (n_seq_max=2), and the
+  // policy decides the order of the other 4 (observed over six runs:
+  // fifo 0.30x, wfq ~1.0x, priority ~2.2x).
   async function onCompare() {
     if (running) return;
     setBusy(true);
-    const opts = readOpts();
+    const opts = Object.assign(readOpts(), { n: 6, highLast: 2 });
     const original = $("policy").value;
     const rows = [];
     $("cmp-body").innerHTML = "";

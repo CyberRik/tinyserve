@@ -60,7 +60,7 @@ class ActivePolicy:
     The batch loop reads this every tick instead of closing over a policy
     object, so POST /config/policy can swap the policy on a running server.
     That exists so the FIFO-vs-WFQ comparison can be driven from one server
-    instead of two on different ports (docs/demo-page-prd.md Section 5).
+    instead of two on different ports.
     Swapping only affects requests admitted after the swap -- sequences
     already holding a slot run to completion under the old policy.
     """
@@ -343,14 +343,16 @@ async def set_policy(body: PolicyRequest, http_request: Request) -> ConfigRespon
 
 @app.get("/demo", include_in_schema=False)
 async def demo_page() -> FileResponse:
-    """Static demo client (docs/demo-page-prd.md).
+    """Static demo client.
 
     Served from the app rather than opened as a file:// page purely so it
     shares an origin with /generate -- the alternative was adding permissive
     CORS to the real server for a demo's benefit. Adds no runtime behaviour;
     it drives the same public endpoint curl does.
     """
-    return FileResponse(_DEMO_PAGE, media_type="text/html")
+    # no-store: the page changes while demos are being iterated on, and a cached
+    # copy is indistinguishable on screen from the current one until it runs.
+    return FileResponse(_DEMO_PAGE, media_type="text/html", headers={"Cache-Control": "no-store"})
 
 
 @app.get("/metrics")
